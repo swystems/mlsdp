@@ -1,6 +1,8 @@
 import extern "AK/Math.h" {
     extern fn min<T>(anon a: T, anon b: T) -> T
     extern fn max<T>(anon a: T, anon b: T) -> T
+    extern fn log<T>(anon x: T) -> T
+    extern fn exp<T>(anon x: T) -> T
 }
 
 struct SensitivityId { id: u64 }
@@ -58,7 +60,7 @@ fn unchecked() -> TypeId => TypeId(id: 0)
 class SensitivityMapped<T> {
     public value: T
     public sensitivity: SensitivityId?
-    public sensitivity_multiplier: u64 = 1
+    public sensitivity_multiplier: f64 = 1f64
 }
 
 enum InferredRange<T> {
@@ -129,17 +131,17 @@ boxed enum Expression {
         }
     }
 
-    fn add_sensitivity(mut this, sensitivity_context: &mut Context<SensitivityId, u64>) -> Expression {
+    fn add_sensitivity(mut this, sensitivity_context: &mut Context<SensitivityId, f64>) -> Expression {
         mut sens = SensitivityMapped(value: .type.value, sensitivity: .type.sensitivity)
         if .type.sensitivity is None {
             let id = SensitivityId(id: sensitivity_context.map.size() as! u64)
-            sensitivity_context.map.set(id, 1)
+            sensitivity_context.map.set(id, 1f64)
             sens.sensitivity = id
             match this { else(&mut type) => { type.sensitivity = id } }
         } else {
             let id = .type.sensitivity!
             let value = sensitivity_context.lookup(id)
-            sensitivity_context.map.set(id, value + 1)
+            sensitivity_context.map.set(id, value + 1f64)
         }
 
         return match this {
@@ -306,12 +308,18 @@ fn merge_bounds(
     }
 }
 
+fn smooth(anon existing: f64, anon local: f64, beta: f64) -> f64 {
+    let result = existing * exp(-beta * local)
+    print("Smoothed {} with {} and {} to {}\n", existing, local, beta, result)
+    return result
+}
+
 fn sens_merge(
     anon sens1: SensitivityId?
     anon sens2: SensitivityId?
     op: Operation
-    local_sensitivity: u64
-    sensitivity_context: &mut Context<SensitivityId, u64>
+    local_sensitivity: f64
+    sensitivity_context: &mut Context<SensitivityId, f64>
 ) -> SensitivityId? {
     if sens1 is None { return sens2 }
     if sens2 is None { return None }
@@ -321,10 +329,14 @@ fn sens_merge(
 
     let value1 = sensitivity_context.lookup(s1)
     let value2 = sensitivity_context.lookup(s2)
+    let beta = min(
+        log(value1 / local_sensitivity)
+        log(value2 / local_sensitivity)
+    )
     let result = match op {
         Add | Sub => value1 + value2 + local_sensitivity
-        Mul => (value1 + local_sensitivity) * (value2 + local_sensitivity)
-        Div => (value1 + local_sensitivity) * (value2 + local_sensitivity)
+        Mul => smooth(value1, local_sensitivity, beta) * smooth(value2, local_sensitivity, beta)
+        Div => smooth(value1, local_sensitivity, beta) * smooth(value2, local_sensitivity, beta)
     }
     // FIXME: \beta-smooth sensitivity to approximate global sensitivity:
 
@@ -338,7 +350,7 @@ fn typecheck(
     type_context: &mut Context<String, TypeId>
     type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
     epsilon_context: &mut Context<EpsilonId, f64>
-    sensitivity_context: &mut Context<SensitivityId, u64>
+    sensitivity_context: &mut Context<SensitivityId, f64>
     anon mut expr: Expression
 ) throws -> Expression => match expr {
     IntLiteral(value) => expr.with_type(make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: value, to: value))))
@@ -357,14 +369,14 @@ fn typecheck(
                 &mut type_level_sensitivity_context
                 &mut epsilon_context
                 &mut sensitivity_context
-            ](anon x: &Expression) throws -> (Expression, Context<SensitivityId, u64>) {
+            ](anon x: &Expression) throws -> (Expression, Context<SensitivityId, f64>) {
                 mut new_sensitivity_context = child_context(*sensitivity_context)
                 let result = typecheck(type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context: &mut new_sensitivity_context, *x)
                 return (result, new_sensitivity_context)
             }
         )
         let type = checked_operands.map(
-            &fn(anon x: &(Expression, Context<SensitivityId, u64>)) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, u64>) => (x.0.type, x.1)
+            &fn(anon x: &(Expression, Context<SensitivityId, f64>)) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) => (x.0.type, x.1)
         ).fold(
             &fn[
                 &mut type_map
@@ -372,13 +384,13 @@ fn typecheck(
                 &mut epsilon_context
                 &mut sensitivity_context
                 op
-            ](anon acc: (SensitivityMapped<TypeId>, Context<SensitivityId, u64>), anon x: &(SensitivityMapped<TypeId>, Context<SensitivityId, u64>)) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, u64>) {
+            ](anon acc: (SensitivityMapped<TypeId>, Context<SensitivityId, f64>), anon x: &(SensitivityMapped<TypeId>, Context<SensitivityId, f64>)) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) {
                 let acc_type = type_map[acc.0.value]
                 let x_type = type_map[x.0.value]
                 // FIXME: Implement type unification + sensitivity merging
                 let local_sensitivity = match x.0.sensitivity.has_value() {
                     true => x.1.lookup(x.0.sensitivity!)
-                    false => 0
+                    false => 0f64
                 }
                 let sensitivity = sens_merge(acc.0.sensitivity, x.0.sensitivity, op, local_sensitivity, &mut sensitivity_context)
                 eprintln("Merging types {} and {} with op {} and sensitivity {}", acc_type, x_type, op, sensitivity)
@@ -390,7 +402,7 @@ fn typecheck(
             }
         ).0
 
-        let operands = checked_operands.map(&fn(anon x: &(Expression, Context<SensitivityId, u64>)) throws => x.0)
+        let operands = checked_operands.map(&fn(anon x: &(Expression, Context<SensitivityId, f64>)) throws => x.0)
 
         yield Expression::Operation(type, op, operands)
     }
@@ -405,12 +417,12 @@ fn main() {
     mut type_context: Context<String, TypeId> = Context(map: [:])
     mut type_level_sensitivity_context: Context<TypeId, SensitivityId> = Context(map: [:])
     mut epsilon_context: Context<EpsilonId, f64> = Context(map: [:])
-    mut sensitivity_context: Context<SensitivityId, u64> = Context(map: [:])
+    mut sensitivity_context: Context<SensitivityId, f64> = Context(map: [:])
 
     let variable_type = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0i32, to: 100i32)))
     type_context.insert("x", variable_type)
     let variable_sens = SensitivityId(id: 0)
-    sensitivity_context.insert(variable_sens, 1u64)
+    sensitivity_context.insert(variable_sens, 1f64)
     type_level_sensitivity_context.insert(variable_type, variable_sens)
 
     mut e1 = Expression::IntLiteral(value: 42).with_type(
