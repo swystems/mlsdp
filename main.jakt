@@ -3,6 +3,8 @@ import extern "AK/Math.h" {
     extern fn max<T>(anon a: T, anon b: T) -> T
     extern fn log<T>(anon x: T) -> T
     extern fn exp<T>(anon x: T) -> T
+    extern fn fabs<T requires(Floating)>(anon x: T) -> T
+    extern fn sqrt<T requires(Floating)>(anon x: T) -> T
 }
 
 struct SensitivityId { id: u64 }
@@ -75,7 +77,7 @@ struct Label implements(Equal<Label>) {
 
 boxed enum Type {
     Unchecked
-    Int(InferredRange<i32>)
+    Int(InferredRange<i64>)
     Bool(InferredRange<bool>)
     List(type: TypeId, size: usize)
     TypeWithSec(type: TypeId, label: Label, epsilon: EpsilonId)
@@ -105,7 +107,7 @@ enum Operation {
 boxed enum Expression {
     type: SensitivityMapped<TypeId> = SensitivityMapped(value: unchecked(), sensitivity: None)
 
-    IntLiteral(value: i32)
+    IntLiteral(value: i64)
     Variable(name: String)
     Noise(expr: Expression, epsilon: EpsilonId)
     Declassify(expr: Expression, source_epsilon: EpsilonId, target_label: Label, target_epsilon: EpsilonId)
@@ -314,12 +316,25 @@ fn smooth(anon existing: f64, anon local: f64, beta: f64) -> f64 {
     return result
 }
 
+fn max_difference_for(anon x: &Type, anon type_map: &[TypeId: Type]) -> f64? => match x {
+    Int(range) => match range {
+        Unknown => None // TODO: Implement infinite sensitivity
+        Bounded(from, to) => fabs(to as! f64 - from as! f64)
+    }
+    Bool => 1f64
+    TypeWithSec(type) => max_difference_for(&type_map[type], type_map)
+    else => None
+}
+
 fn sens_merge(
     anon sens1: SensitivityId?
     anon sens2: SensitivityId?
     op: Operation
     local_sensitivity: f64
     sensitivity_context: &mut Context<SensitivityId, f64>
+    type_map: &mut [TypeId: Type]
+    anon lhs: Type
+    anon rhs: Type
 ) -> SensitivityId? {
     if sens1 is None { return sens2 }
     if sens2 is None { return None }
@@ -329,16 +344,23 @@ fn sens_merge(
 
     let value1 = sensitivity_context.lookup(s1)
     let value2 = sensitivity_context.lookup(s2)
+
+    guard max_difference_for(&lhs, &type_map) is Some(lhs_max_diff) else { return None }
+    guard max_difference_for(&rhs, &type_map) is Some(rhs_max_diff) else { return None }
+
+    eprintln("Difference for {} is {} and for {} is {}", lhs, lhs_max_diff, rhs, rhs_max_diff)
+
+    let gd = min(lhs_max_diff, rhs_max_diff)
     let beta = min(
         log(value1 / local_sensitivity)
         log(value2 / local_sensitivity)
-    )
+    ) / 25f64
+    eprintln("Sensitivity merge: {} and {} with op {} and local sensitivity {} and beta {}", value1, value2, op, local_sensitivity, beta)
     let result = match op {
         Add | Sub => value1 + value2 + local_sensitivity
-        Mul => smooth(value1, local_sensitivity, beta) * smooth(value2, local_sensitivity, beta)
-        Div => smooth(value1, local_sensitivity, beta) * smooth(value2, local_sensitivity, beta)
+        Mul => max(smooth(value1, gd, beta), smooth(value2, gd, beta))
+        Div => max(smooth(value1, gd, beta), smooth(value2, gd, beta))
     }
-    // FIXME: \beta-smooth sensitivity to approximate global sensitivity:
 
     let id = SensitivityId(id: sensitivity_context.map.size() as! u64)
     sensitivity_context.map.set(id, result)
@@ -392,7 +414,7 @@ fn typecheck(
                     true => x.1.lookup(x.0.sensitivity!)
                     false => 0f64
                 }
-                let sensitivity = sens_merge(acc.0.sensitivity, x.0.sensitivity, op, local_sensitivity, &mut sensitivity_context)
+                let sensitivity = sens_merge(acc.0.sensitivity, x.0.sensitivity, op, local_sensitivity, &mut sensitivity_context, &mut type_map, acc_type, x_type)
                 eprintln("Merging types {} and {} with op {} and sensitivity {}", acc_type, x_type, op, sensitivity)
                 let sens = SensitivityMapped(
                     value: make_type(type_map, merge_bounds(type_map, acc_type, x_type, op))
@@ -419,7 +441,7 @@ fn main() {
     mut epsilon_context: Context<EpsilonId, f64> = Context(map: [:])
     mut sensitivity_context: Context<SensitivityId, f64> = Context(map: [:])
 
-    let variable_type = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0i32, to: 100i32)))
+    let variable_type = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0i64, to: 10000i64)))
     type_context.insert("x", variable_type)
     let variable_sens = SensitivityId(id: 0)
     sensitivity_context.insert(variable_sens, 1f64)
@@ -429,7 +451,7 @@ fn main() {
         make_type(
             &mut type_map
             Type::TypeWithSec(
-                type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0i32, to: 100i32)))
+                type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0i64, to: 100i64)))
                 label: Label(name: "public")
                 epsilon: EpsilonId(id: 0)
             )
