@@ -82,6 +82,15 @@ boxed enum Type {
     List(type: TypeId, size: usize)
     TypeWithSec(type: TypeId, label: Label, epsilon: EpsilonId)
 
+    fn element_type(this, type_map: &mut [TypeId:Type]) -> TypeId => match this {
+        List(type) => type
+        TypeWithSec(type, label, epsilon) => make_type(type_map, Type::TypeWithSec(type, label, epsilon))
+        else => {
+            eprintln("Invalid element type request for {}", this)
+            abort()
+        }
+    }
+
     fn render(this, anon type_map: &[TypeId: Type]) throws -> String => match this {
         Unchecked => "unchecked"
         Int(range) => match range {
@@ -186,6 +195,64 @@ boxed enum Statement {
     IfThenElse(condition: Expression, consequence: Statement, alternative: Statement)
     Assign(var: String, value: Expression)
     Sequence(first: Statement, second: Statement)
+
+    fn to_tree(this, type_map: &[TypeId: Type], indent: usize = 0) throws {
+        match this {
+            Expression(expr) => expr.to_tree(type_map, indent: indent)
+            ForEach(var, index, list, body) => {
+                println(
+                    "{: >{}}for {} in {} type={} sens=s{}*{}"
+                    ""
+                    indent
+                    var
+                    list
+                    type_map[.type.value].render(type_map)
+                    .type.sensitivity?.id
+                    .type.sensitivity_multiplier
+                )
+                body.to_tree(type_map, indent: indent + 2)
+            }
+            Return(expr) => {
+                println(
+                    "{: >{}}return type={} sens=s{}*{}"
+                    ""
+                    indent
+                    type_map[.type.value].render(type_map)
+                    .type.sensitivity?.id
+                    .type.sensitivity_multiplier
+                )
+                expr.to_tree(type_map, indent: indent + 2)
+            }
+            IfThenElse(condition, consequence, alternative) => {
+                println(
+                    "{: >{}}if type={} sens=s{}*{}"
+                    ""
+                    indent
+                    type_map[.type.value].render(type_map)
+                    .type.sensitivity?.id
+                    .type.sensitivity_multiplier
+                )
+                consequence.to_tree(type_map, indent: indent + 2)
+                alternative.to_tree(type_map, indent: indent + 2)
+            }
+            Assign(var, value) => {
+                println(
+                    "{: >{}}{} = {} type={} sens=s{}*{}"
+                    ""
+                    indent
+                    var
+                    value
+                    type_map[.type.value].render(type_map)
+                    .type.sensitivity?.id
+                    .type.sensitivity_multiplier
+                )
+            }
+            Sequence(first, second) => {
+                first.to_tree(type_map, indent: indent)
+                second.to_tree(type_map, indent: indent)
+            }
+        }
+    }
 }
 
 struct Procedure {
@@ -203,6 +270,7 @@ class Context<K requires(Hashable), V> {
         if not .map.contains(key) {
             if .base is Some(base) { return base.lookup(key) }
             eprintln("Key not found: '{}'", key)
+            eprintln("  in context: {}", this)
             abort()
         }
         return .map[key]
@@ -369,6 +437,7 @@ fn typecheck(
     IntLiteral(value) => expr.with_type(make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: value, to: value))))
     Variable(name) => {
         let type = type_context.lookup(name)
+        eprintln("Variable {} has type {}", name, type_map[type].render(&type_map))
         yield expr.with_type(
             type
             sensitivity: type_level_sensitivity_context.find(type)
@@ -425,6 +494,81 @@ fn typecheck(
     }
 }
 
+fn typecheck(
+    type_map: &mut [TypeId:Type]
+    type_context: &mut Context<String, TypeId>
+    type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
+    epsilon_context: &mut Context<EpsilonId, f64>
+    sensitivity_context: &mut Context<SensitivityId, f64>
+    anon mut stmt: Statement
+) throws -> Statement => match stmt {
+    Expression(
+        expr
+    ) => Statement::Expression(
+        typecheck(type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+    )
+    ForEach(var, index, list, body) => {
+        let list_expr = typecheck(
+            type_map
+            type_context
+            type_level_sensitivity_context
+            epsilon_context
+            sensitivity_context
+            list
+        )
+        let list_type = type_map.get(list_expr.type.value)!
+        let list_sens = type_level_sensitivity_context.find(list_expr.type.value)
+        let entry_var_type = list_type.element_type(&mut type_map)
+        mut new_type_context = child_context(*type_context)
+        new_type_context.insert(var, entry_var_type)
+        let entry_var_sens = SensitivityId(id: sensitivity_context.map.size() as! u64)
+        sensitivity_context.insert(entry_var_sens, 1f64)
+        type_level_sensitivity_context.insert(entry_var_type, entry_var_sens)
+
+        if sens_merge(
+                list_sens
+                entry_var_sens
+                op: Operation::Add
+                local_sensitivity: 0f64
+                sensitivity_context
+                type_map
+                list_type
+                type_map.get(entry_var_type)!
+            ) is Some(new_sens) {
+            type_level_sensitivity_context.insert(entry_var_type, new_sens)
+            sensitivity_context.insert(new_sens, 1f64)
+        }
+
+        let body_stmt = typecheck(
+            type_map
+            type_context: &mut new_type_context
+            type_level_sensitivity_context
+            epsilon_context
+            sensitivity_context
+            body
+        )
+        let body_sens = type_level_sensitivity_context.find(body_stmt.type.value)
+        if sens_merge(
+            list_sens
+            body_sens
+            op: Operation::Add
+            local_sensitivity: 0f64
+            sensitivity_context
+            type_map
+            type_map.get(list_expr.type.value)!
+            type_map.get(body_stmt.type.value)!
+        ) is Some(new_sens) {
+            type_level_sensitivity_context.insert(body_stmt.type.value, new_sens)
+        }
+
+        yield Statement::ForEach(var, index, list: list_expr, body: body_stmt)
+    }
+    else => {
+        eprintln("Typecheck not implemented for ", stmt)
+        abort()
+    }
+}
+
 fn main() {
     mut type_map: [TypeId:Type] = [unchecked(): Type::Unchecked]
     mut type_context: Context<String, TypeId> = Context(map: [:])
@@ -432,11 +576,20 @@ fn main() {
     mut epsilon_context: Context<EpsilonId, f64> = Context(map: [:])
     mut sensitivity_context: Context<SensitivityId, f64> = Context(map: [:])
 
-    let variable_type = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0i64, to: 10000i64)))
-    type_context.insert("x", variable_type)
-    let variable_sens = SensitivityId(id: 0)
-    sensitivity_context.insert(variable_sens, 1f64)
-    type_level_sensitivity_context.insert(variable_type, variable_sens)
+    // let variable_type = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0i64, to: 10000i64)))
+    // type_context.insert("x", variable_type)
+    // let variable_sens = SensitivityId(id: 0)
+    // sensitivity_context.insert(variable_sens, 1f64)
+    // type_level_sensitivity_context.insert(variable_type, variable_sens)
+
+    let list_sens = SensitivityId(id: 1)
+    sensitivity_context.insert(list_sens, 1f64)
+    let list_type = make_type(
+        &mut type_map
+        Type::List(type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64))), size: 100)
+    )
+    type_context.insert("list", list_type)
+    type_level_sensitivity_context.insert(list_type, list_sens)
 
     mut e1 = Expression::IntLiteral(value: 42).with_type(
         make_type(
@@ -459,7 +612,16 @@ fn main() {
         operands: [expr, e3]
     )
 
-    let checked = typecheck(&mut type_map, &mut type_context, &mut type_level_sensitivity_context, &mut epsilon_context, &mut sensitivity_context, expr)
+    let list = Expression::Variable(name: "list")
+
+    let statement = Statement::ForEach(
+        var: "x"
+        index: "i"
+        list
+        body: Statement::Expression(expr)
+    )
+
+    let checked = typecheck(&mut type_map, &mut type_context, &mut type_level_sensitivity_context, &mut epsilon_context, &mut sensitivity_context, statement)
 
     eprintln("Sensitivity context:")
     sensitivity_context.dump()
