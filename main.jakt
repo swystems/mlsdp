@@ -345,21 +345,12 @@ fn sens_merge(
     let value1 = sensitivity_context.lookup(s1)
     let value2 = sensitivity_context.lookup(s2)
 
-    guard max_difference_for(&lhs, &type_map) is Some(lhs_max_diff) else { return None }
-    guard max_difference_for(&rhs, &type_map) is Some(rhs_max_diff) else { return None }
-
-    eprintln("Difference for {} is {} and for {} is {}", lhs, lhs_max_diff, rhs, rhs_max_diff)
-
-    let gd = min(lhs_max_diff, rhs_max_diff)
-    let beta = min(
-        log(value1 / local_sensitivity)
-        log(value2 / local_sensitivity)
-    ) / 25f64
-    eprintln("Sensitivity merge: {} and {} with op {} and local sensitivity {} and beta {}", value1, value2, op, local_sensitivity, beta)
+    guard max_difference_for(&lhs, &type_map) is Some(lhs_max_diff)
+        and max_difference_for(&rhs, &type_map) is Some(rhs_max_diff)
+        else { return None }
     let result = match op {
         Add | Sub => value1 + value2 + local_sensitivity
-        Mul => max(smooth(value1, gd, beta), smooth(value2, gd, beta))
-        Div => max(smooth(value1, gd, beta), smooth(value2, gd, beta))
+        Mul | Div => value1 * rhs_max_diff + value2 * lhs_max_diff + local_sensitivity
     }
 
     let id = SensitivityId(id: sensitivity_context.map.size() as! u64)
