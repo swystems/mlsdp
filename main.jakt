@@ -269,11 +269,11 @@ boxed enum Statement {
         Expression(expr) => expr.to_tree(type_map, indent: indent)
         ForEach(var, index, list, body) =>
             format(
-                "{: >{}}for {} in {} type={} sens=s{}*{}\n"
+                "{: >{}}for {} in [{}] type={} sens=s{}*{}\n"
                 ""
                 indent
                 var
-                list
+                list.to_tree(type_map, indent)
                 type_map[.type.value].render(type_map)
                 .type.sensitivity?.id
                 .type.sensitivity_multiplier
@@ -302,7 +302,7 @@ boxed enum Statement {
                 ""
                 indent
                 var
-                value
+                value.to_tree(type_map, indent)
                 type_map[.type.value].render(type_map)
                 .type.sensitivity?.id
                 .type.sensitivity_multiplier
