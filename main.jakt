@@ -80,6 +80,7 @@ boxed enum Type {
     Int(InferredRange<i64>)
     Bool(InferredRange<bool>)
     List(type: TypeId, size: usize)
+    Pair(left: TypeId, right: TypeId)
     TypeWithSec(type: TypeId, label: Label, epsilon: EpsilonId)
 
     fn element_type(this, type_map: &mut [TypeId:Type]) -> TypeId => match this {
@@ -93,6 +94,7 @@ boxed enum Type {
 
     fn element_count(this, type_map: &[TypeId:Type]) -> usize => match this {
         List(size) => size
+        Pair => 2
         TypeWithSec(type) => type_map[type].element_count(type_map)
         else => 1
     }
@@ -108,6 +110,7 @@ boxed enum Type {
             Bounded(from: from, to: to) => format("bool({}..{})", from, to)
         }
         List(type, size) => format("list {} {}", type_map[type].render(type_map), size)
+        Pair(left, right) => format("{} × {}", type_map[left].render(type_map), type_map[right].render(type_map))
         TypeWithSec(type: type_id, label: label, epsilon: epsilon) => {
             let inner = type_map[type_id].render(type_map)
             return format("{} lab({}) eps(e{})", inner, label.name, epsilon.id)
@@ -116,7 +119,7 @@ boxed enum Type {
 }
 
 enum Operation {
-    Add, Sub, Mul, Div
+    Add, Sub, Mul, Div, Pair
 }
 
 boxed enum Expression {
@@ -172,23 +175,62 @@ boxed enum Expression {
         }
     }
 
-    fn to_tree(this, type_map: &[TypeId:Type], indent: usize = 0) throws => match this {
-        IntLiteral(value: x) => println("{: >{}}int({}) type={} sens=s{}*{}", "", indent, x, type_map[.type.value].render(type_map), .type.sensitivity?.id, .type.sensitivity_multiplier)
-        Variable(name: x) => println("{: >{}}var({}) type={} sens=s{}*{}", "", indent, x, type_map[.type.value].render(type_map), .type.sensitivity?.id, .type.sensitivity_multiplier)
+    fn to_tree(this, type_map: &[TypeId:Type], indent: usize = 0) throws -> String => match this {
+        IntLiteral(
+            value: x
+        ) => format(
+            "{: >{}}int({}) type={} sens=s{}*{}"
+            ""
+            indent
+            x
+            type_map[.type.value].render(type_map)
+            .type.sensitivity?.id
+            .type.sensitivity_multiplier
+        )
+        Variable(
+            name: x
+        ) => format(
+            "{: >{}}var({}) type={} sens=s{}*{}"
+            ""
+            indent
+            x
+            type_map[.type.value].render(type_map)
+            .type.sensitivity?.id
+            .type.sensitivity_multiplier
+        )
         Noise(expr, epsilon) => {
             abort()
         }
         Declassify(expr, source_epsilon, target_label, target_epsilon) => {
             abort()
         }
-        Subscript(expr, index) => {
-            abort()
-        }
+        Subscript(
+            expr
+            index
+        ) => format(
+            "{: >{}}sub({}) {} type={} sens=s{}*{}"
+            ""
+            indent
+            index.to_tree(type_map, indent: 0)
+            expr.to_tree(type_map, indent: 0)
+            type_map[.type.value].render(type_map)
+            .type.sensitivity?.id
+            .type.sensitivity_multiplier
+        )
         Operation(op, operands) => {
-            println("{: >{}}op({}) type={} sens=s{}*{}", "", indent, op, type_map[.type.value].render(type_map), .type.sensitivity?.id, .type.sensitivity_multiplier)
+            mut x = format(
+                "{: >{}}op({}) type={} sens=s{}*{}"
+                ""
+                indent
+                op
+                type_map[.type.value].render(type_map)
+                .type.sensitivity?.id
+                .type.sensitivity_multiplier
+            )
             for operand in operands {
-                operand.to_tree(type_map, indent: indent + 2)
+                x += "\n" + operand.to_tree(type_map, indent: indent + 2)
             }
+            yield x
         }
     }
 }
@@ -223,62 +265,50 @@ boxed enum Statement {
         }
     }
 
-    fn to_tree(this, type_map: &[TypeId: Type], indent: usize = 0) throws {
-        match this {
-            Expression(expr) => expr.to_tree(type_map, indent: indent)
-            ForEach(var, index, list, body) => {
-                println(
-                    "{: >{}}for {} in {} type={} sens=s{}*{}"
-                    ""
-                    indent
-                    var
-                    list
-                    type_map[.type.value].render(type_map)
-                    .type.sensitivity?.id
-                    .type.sensitivity_multiplier
-                )
-                body.to_tree(type_map, indent: indent + 2)
-            }
-            Return(expr) => {
-                println(
-                    "{: >{}}return type={} sens=s{}*{}"
-                    ""
-                    indent
-                    type_map[.type.value].render(type_map)
-                    .type.sensitivity?.id
-                    .type.sensitivity_multiplier
-                )
-                expr.to_tree(type_map, indent: indent + 2)
-            }
-            IfThenElse(condition, consequence, alternative) => {
-                println(
-                    "{: >{}}if type={} sens=s{}*{}"
-                    ""
-                    indent
-                    type_map[.type.value].render(type_map)
-                    .type.sensitivity?.id
-                    .type.sensitivity_multiplier
-                )
-                consequence.to_tree(type_map, indent: indent + 2)
-                alternative.to_tree(type_map, indent: indent + 2)
-            }
-            Assign(var, value) => {
-                println(
-                    "{: >{}}{} = {} type={} sens=s{}*{}"
-                    ""
-                    indent
-                    var
-                    value
-                    type_map[.type.value].render(type_map)
-                    .type.sensitivity?.id
-                    .type.sensitivity_multiplier
-                )
-            }
-            Sequence(first, second) => {
-                first.to_tree(type_map, indent: indent)
-                second.to_tree(type_map, indent: indent)
-            }
-        }
+    fn to_tree(this, type_map: &[TypeId: Type], indent: usize = 0) throws -> String => match this {
+        Expression(expr) => expr.to_tree(type_map, indent: indent)
+        ForEach(var, index, list, body) =>
+            format(
+                "{: >{}}for {} in {} type={} sens=s{}*{}\n"
+                ""
+                indent
+                var
+                list
+                type_map[.type.value].render(type_map)
+                .type.sensitivity?.id
+                .type.sensitivity_multiplier
+            ) + body.to_tree(type_map, indent: indent + 2)
+        Return(expr) =>
+            format(
+                "{: >{}}return type={} sens=s{}*{}"
+                ""
+                indent
+                type_map[.type.value].render(type_map)
+                .type.sensitivity?.id
+                .type.sensitivity_multiplier
+            ) + expr.to_tree(type_map, indent: indent + 2)
+        IfThenElse(condition, consequence, alternative) =>
+            format(
+                "{: >{}}if type={} sens=s{}*{} then\n"
+                ""
+                indent
+                type_map[.type.value].render(type_map)
+                .type.sensitivity?.id
+                .type.sensitivity_multiplier
+            ) + consequence.to_tree(type_map, indent: indent + 2) + "\nelse\n" + alternative.to_tree(type_map, indent: indent + 2)
+        Assign(var, value) =>
+            format(
+                "{: >{}}{} = {} type={} sens=s{}*{}"
+                ""
+                indent
+                var
+                value
+                type_map[.type.value].render(type_map)
+                .type.sensitivity?.id
+                .type.sensitivity_multiplier
+            )
+        Sequence(first, second) =>
+            first.to_tree(type_map, indent: indent) + " ; " + second.to_tree(type_map, indent: indent)
     }
 }
 
@@ -354,6 +384,10 @@ fn merge_bounds(
                         true => InferredRange::Unknown
                         false => InferredRange::Bounded(from: min(min(from1 / from2, from1 / to2), min(to1 / from2, to1 / to2)) to: max(max(from1 / from2, from1 / to2), max(to1 / from2, to1 / to2)))
                     }
+                    Pair => {
+                        eprintln("Invalid operation for int: Pair")
+                        abort()
+                    }
                 }
             }
         })
@@ -373,6 +407,10 @@ fn merge_bounds(
                     Mul => InferredRange::Bounded(from: from1 and from2, to: to1 and to2)
                     Sub => InferredRange::Bounded(from: from1 and not to2, to: to1 and not from2)
                     Div => InferredRange::Bounded(from: from1 and not to2, to: to1 and not from2)
+                    Pair => {
+                        eprintln("Invalid operation for int: Pair")
+                        abort()
+                    }
                 }
             }
         })
@@ -380,6 +418,13 @@ fn merge_bounds(
             eprintln("Type mismatch between {} and {}", type1, type2)
             return type1
         }
+    }
+    Pair(left, right) => {
+        let left_type = type_map[left]
+        let right_type = type_map[right]
+        let new_left = merge_bounds(type_map, left_type, type2, op)
+        let new_right = merge_bounds(type_map, right_type, type2, op)
+        yield Type::Pair(left: make_type(type_map, new_left), right: make_type(type_map, new_right))
     }
     List => {
         eprintln("TODO: Implement list type merging")
@@ -418,6 +463,13 @@ fn max_difference_for(anon x: &Type, anon type_map: &[TypeId: Type]) -> f64? => 
     }
     Bool => 1f64
     List(type) | TypeWithSec(type) => max_difference_for(&type_map[type], type_map)
+    Pair(left, right) => {
+        if max_difference_for(&type_map[left], type_map) is Some(left_diff)
+            and max_difference_for(&type_map[right], type_map) is Some(right_diff) {
+            return max(left_diff, right_diff)
+        }
+        return None
+    }
     else => None
 }
 
@@ -446,6 +498,7 @@ fn sens_merge(
     let result = match op {
         Add | Sub => value1 + value2 + local_sensitivity
         Mul | Div => value1 * rhs_max_diff + value2 * lhs_max_diff + local_sensitivity
+        Pair => 1f64
     }
 
     let id = SensitivityId(id: sensitivity_context.map.size() as! u64)
@@ -468,6 +521,46 @@ fn typecheck(
             type
             sensitivity: type_level_sensitivity_context.find(type)
         ).add_sensitivity(sensitivity_context)
+    }
+    Subscript(expr, index) => {
+        let checked_expr = typecheck(type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+        let checked_index = typecheck(type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, index)
+        mut expr_type = type_map[checked_expr.type.value]
+        let unchecked_expr = Expression::Subscript(expr: checked_expr, index: checked_index)
+        mut wrap_with_sec = fn(anon type: TypeId) throws => type
+
+        if expr_type is TypeWithSec(type, label, epsilon) {
+            wrap_with_sec = fn[
+                &mut type_map
+                label
+                epsilon
+            ](anon type: TypeId) throws -> TypeId => make_type(type_map, Type::TypeWithSec(type, label, epsilon))
+            expr_type = type_map[type]
+        }
+
+        mut result = match expr_type {
+            List(type, size) => unchecked_expr.with_type(wrap_with_sec(type))
+            Pair(left, right) => match checked_index {
+                IntLiteral(value) => match value {
+                    0 => unchecked_expr.with_type(wrap_with_sec(left))
+                    1 => unchecked_expr.with_type(wrap_with_sec(right))
+                    else => {
+                        eprintln("Invalid index for pair: {}", value)
+                        abort()
+                    }
+                }
+                else => {
+                    eprintln("Invalid index type for pair: {}", checked_index)
+                    abort()
+                }
+            }
+            else => {
+                eprintln("Invalid subscript type: {}", expr_type)
+                abort()
+            }
+        }
+
+        yield result.add_sensitivity(sensitivity_context)
     }
     Operation(op, operands) => {
         let checked_operands = operands.map(
@@ -622,38 +715,46 @@ fn main() {
 
     // let variable_type = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0i64, to: 10000i64)))
     // type_context.insert("x", variable_type)
-    // let variable_sens = SensitivityId(id: 0)
-    // sensitivity_context.insert(variable_sens, 1f64)
+    let variable_sens = SensitivityId(id: 0)
+    sensitivity_context.insert(variable_sens, 1f64)
     // type_level_sensitivity_context.insert(variable_type, variable_sens)
+
+    let pair_left = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64)))
+    let pair_right = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64)))
+    let pairs = make_type(&mut type_map, Type::Pair(left: pair_left, right: pair_right))
 
     let list_sens = SensitivityId(id: 1)
     sensitivity_context.insert(list_sens, 1f64)
     let list_type = make_type(
         &mut type_map
-        Type::List(type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64))), size: 100)
+        Type::List(type: pairs, size: 100)
     )
     type_context.insert("list", list_type)
     type_level_sensitivity_context.insert(list_type, list_sens)
 
-    mut e1 = Expression::IntLiteral(value: 42).with_type(
-        make_type(
-            &mut type_map
-            Type::TypeWithSec(
-                type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0i64, to: 100i64)))
-                label: Label(name: "public")
-                epsilon: EpsilonId(id: 0)
-            )
-        )
-    )
+    mut e1 = Expression::Variable(name: "i")
     mut e2 = Expression::Variable(name: "x")
-    mut e3 = Expression::Variable(name: "i")
+    mut e3 = Expression::Variable(name: "x")
     mut expr = Expression::Operation(
-        op: Operation::Add
-        operands: [e1, e2]
-    )
-    expr = Expression::Operation(
         op: Operation::Mul
-        operands: [expr, e3]
+        operands: [
+            e1,
+            Expression::Subscript(
+                expr: e2
+                index: Expression::IntLiteral(value: 0)
+            )
+        ]
+    )
+
+    expr = Expression::Operation(
+        op: Operation::Add
+        operands: [
+            expr,
+            Expression::Subscript(
+                expr: e2
+                index: Expression::IntLiteral(value: 1)
+            )
+        ]
     )
 
     let list = Expression::Variable(name: "list")
@@ -670,5 +771,5 @@ fn main() {
     eprintln("Sensitivity context:")
     sensitivity_context.dump()
 
-    checked.to_tree(&type_map)
+    println("{}", checked.to_tree(&type_map))
 }
