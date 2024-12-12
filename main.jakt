@@ -11,6 +11,12 @@ struct SensitivityId { id: u64 }
 struct TypeId { id: u64 }
 struct EpsilonId { id: u64 }
 
+enum Epsilon {
+    Fixed(f64)
+    Min(a: EpsilonId, b: EpsilonId)
+    Max(a: EpsilonId, b: EpsilonId)
+}
+
 type SensitivityId implements(Hashable, Equal<SensitivityId>) {
     fn hash(this) -> u32 => .id.hash()
     fn equals(this, anon other: SensitivityId) -> bool => .id == other.id
@@ -363,89 +369,91 @@ fn make_type(
 
 fn merge_bounds(
     type_map: &mut [TypeId: Type]
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
     anon type1: Type
     anon type2: Type
     op: Operation
-) throws -> Type => match type1 {
-    Unchecked => type2
-    Int(range1) => match type2 {
-        Int(range2) => Type::Int(match range1 {
-            Unknown => range1
-            Bounded(from: from1, to: to1) => match range2 {
-                Unknown => range2
-                Bounded(from: from2, to: to2) => match op {
-                    Add => InferredRange::Bounded(from: from1 + from2, to: to1 + to2)
-                    Sub => InferredRange::Bounded(from: from1 - to2, to: to1 - from2)
-                    Mul => InferredRange::Bounded(
-                        from: min(min(from1 * from2, from1 * to2), min(to1 * from2, to1 * to2))
-                        to: max(max(from1 * from2, from1 * to2), max(to1 * from2, to1 * to2))
-                    )
-                    Div => match from2 == 0 or to2 == 0 {
-                        true => InferredRange::Unknown
-                        false => InferredRange::Bounded(from: min(min(from1 / from2, from1 / to2), min(to1 / from2, to1 / to2)) to: max(max(from1 / from2, from1 / to2), max(to1 / from2, to1 / to2)))
-                    }
-                    Pair => {
-                        eprintln("Invalid operation for int: Pair")
-                        abort()
-                    }
-                }
-            }
-        })
-        else => {
-            eprintln("Type mismatch between {} and {}", type1, type2)
-            return type1
-        }
-    }
-    Bool(range1) => match type2 {
-        Bool(range2) => Type::Bool(match range1 {
-            Unknown => range1
-            Bounded(from: from1, to: to1) => match range2 {
-                Unknown => range2
-                Bounded(from: from2, to: to2) => match op {
-                    // Add: OR, Mul: AND, Sub: AND NOT, Div: AND NOT; TODO: Split into actual bool operations.
-                    Add => InferredRange::Bounded(from: from1 or from2, to: to1 or to2)
-                    Mul => InferredRange::Bounded(from: from1 and from2, to: to1 and to2)
-                    Sub => InferredRange::Bounded(from: from1 and not to2, to: to1 and not from2)
-                    Div => InferredRange::Bounded(from: from1 and not to2, to: to1 and not from2)
-                    Pair => {
-                        eprintln("Invalid operation for int: Pair")
-                        abort()
+) throws -> Type {
+    if type2 is TypeWithSec and not type1 is TypeWithSec { return merge_bounds(type_map, epsilon_context, type2, type1, op) }
+    return match type1 {
+        Unchecked => type2
+        Int(range1) => match type2 {
+            Int(range2) => Type::Int(match range1 {
+                Unknown => range1
+                Bounded(from: from1, to: to1) => match range2 {
+                    Unknown => range2
+                    Bounded(from: from2, to: to2) => match op {
+                        Add => InferredRange::Bounded(from: from1 + from2, to: to1 + to2)
+                        Sub => InferredRange::Bounded(from: from1 - to2, to: to1 - from2)
+                        Mul => InferredRange::Bounded(
+                            from: min(min(from1 * from2, from1 * to2), min(to1 * from2, to1 * to2))
+                            to: max(max(from1 * from2, from1 * to2), max(to1 * from2, to1 * to2))
+                        )
+                        Div => match from2 == 0 or to2 == 0 {
+                            true => InferredRange::Unknown
+                            false => InferredRange::Bounded(from: min(min(from1 / from2, from1 / to2), min(to1 / from2, to1 / to2)) to: max(max(from1 / from2, from1 / to2), max(to1 / from2, to1 / to2)))
+                        }
+                        Pair => {
+                            eprintln("Invalid operation for int: Pair")
+                            abort()
+                        }
                     }
                 }
+            })
+            else => {
+                eprintln("Type mismatch between {} and {}", type1, type2)
+                return type1
             }
-        })
-        else => {
-            eprintln("Type mismatch between {} and {}", type1, type2)
+        }
+        Bool(range1) => match type2 {
+            Bool(range2) => Type::Bool(match range1 {
+                Unknown => range1
+                Bounded(from: from1, to: to1) => match range2 {
+                    Unknown => range2
+                    Bounded(from: from2, to: to2) => match op {
+                        // Add: OR, Mul: AND, Sub: AND NOT, Div: AND NOT; TODO: Split into actual bool operations.
+                        Add => InferredRange::Bounded(from: from1 or from2, to: to1 or to2)
+                        Mul => InferredRange::Bounded(from: from1 and from2, to: to1 and to2)
+                        Sub => InferredRange::Bounded(from: from1 and not to2, to: to1 and not from2)
+                        Div => InferredRange::Bounded(from: from1 and not to2, to: to1 and not from2)
+                        Pair => {
+                            eprintln("Invalid operation for int: Pair")
+                            abort()
+                        }
+                    }
+                }
+            })
+            else => {
+                eprintln("Type mismatch between {} and {}", type1, type2)
+                return type1
+            }
+        }
+        Pair(left, right) => {
+            let left_type = type_map[left]
+            let right_type = type_map[right]
+            let new_left = merge_bounds(type_map, epsilon_context, left_type, type2, op)
+            let new_right = merge_bounds(type_map, epsilon_context, right_type, type2, op)
+            yield Type::Pair(left: make_type(type_map, new_left), right: make_type(type_map, new_right))
+        }
+        List => {
+            eprintln("TODO: Implement list type merging")
             return type1
         }
-    }
-    Pair(left, right) => {
-        let left_type = type_map[left]
-        let right_type = type_map[right]
-        let new_left = merge_bounds(type_map, left_type, type2, op)
-        let new_right = merge_bounds(type_map, right_type, type2, op)
-        yield Type::Pair(left: make_type(type_map, new_left), right: make_type(type_map, new_right))
-    }
-    List => {
-        eprintln("TODO: Implement list type merging")
-        return type1
-    }
-    TypeWithSec(type: type_id1, label: label1, epsilon: epsilon1) => match type2 {
-        TypeWithSec(type: type_id2, label: label2, epsilon: epsilon2) => {
-            if label1 != label2 {
-                eprintln("Label mismatch between {} and {}", type1, type2)
-                return type1
+        TypeWithSec(type: ty1, label: label1, epsilon: epsilon1) => match type2 {
+            TypeWithSec(type: ty2, label: label2, epsilon: epsilon2) => {
+                if label1 != label2 {
+                    eprintln("Label mismatch between {} and {}", type1.render(&type_map), type2.render(&type_map))
+                    return type2
+                }
+                let inner = merge_bounds(type_map, epsilon_context, type_map[ty1], type_map[ty2], op)
+                let epsilon = EpsilonId(id: epsilon_context.map.size() as! u64)
+                epsilon_context.insert(epsilon, Epsilon::Max(a: epsilon1, b: epsilon2))
+                yield Type::TypeWithSec(type: make_type(type_map, inner), label: label1, epsilon)
             }
-            if epsilon1 != epsilon2 { // FIXME: Epsilon merging
-                eprintln("Epsilon mismatch between {} and {}", type1, type2)
-                return type1
+            else => {
+                let inner = merge_bounds(type_map, epsilon_context, type_map[ty1], type2, op)
+                yield Type::TypeWithSec(type: make_type(type_map, inner), label: label1, epsilon: epsilon1)
             }
-            let inner = merge_bounds(type_map, type_map[type_id1], type_map[type_id2], op)
-            yield Type::TypeWithSec(type: make_type(type_map, inner), label: label1, epsilon: epsilon1)
-        }
-        else => {
-            let inner = merge_bounds(type_map, type_map[type_id1], type2, op)
-            yield Type::TypeWithSec(type: make_type(type_map, inner), label: label1, epsilon: epsilon1)
         }
     }
 }
@@ -510,7 +518,7 @@ fn typecheck(
     type_map: &mut [TypeId:Type]
     type_context: &mut Context<String, TypeId>
     type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
-    epsilon_context: &mut Context<EpsilonId, f64>
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
     sensitivity_context: &mut Context<SensitivityId, f64>
     anon mut expr: Expression
 ) throws -> Expression => match expr {
@@ -595,7 +603,7 @@ fn typecheck(
                 }
                 let sensitivity = sens_merge(acc.0.sensitivity, x.0.sensitivity, op, local_sensitivity, &mut sensitivity_context, &mut type_map, acc_type, x_type)
                 let sens = SensitivityMapped(
-                    value: make_type(type_map, merge_bounds(type_map, acc_type, x_type, op))
+                    value: make_type(type_map, merge_bounds(type_map, epsilon_context, acc_type, x_type, op))
                     sensitivity
                 )
                 return (sens, acc.1)
@@ -616,7 +624,7 @@ fn typecheck(
     type_map: &mut [TypeId:Type]
     type_context: &mut Context<String, TypeId>
     type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
-    epsilon_context: &mut Context<EpsilonId, f64>
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
     sensitivity_context: &mut Context<SensitivityId, f64>
     anon mut stmt: Statement
 ) throws -> Statement => match stmt {
@@ -710,8 +718,11 @@ fn main() {
     mut type_map: [TypeId:Type] = [unchecked(): Type::Unchecked]
     mut type_context: Context<String, TypeId> = Context(map: [:])
     mut type_level_sensitivity_context: Context<TypeId, SensitivityId> = Context(map: [:])
-    mut epsilon_context: Context<EpsilonId, f64> = Context(map: [:])
+    mut epsilon_context: Context<EpsilonId, Epsilon> = Context(map: [:])
     mut sensitivity_context: Context<SensitivityId, f64> = Context(map: [:])
+
+    epsilon_context.insert(EpsilonId(id: 0), Epsilon::Fixed(1f64))
+    epsilon_context.insert(EpsilonId(id: 1), Epsilon::Fixed(1f64))
 
     // let variable_type = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0i64, to: 10000i64)))
     // type_context.insert("x", variable_type)
@@ -719,8 +730,18 @@ fn main() {
     sensitivity_context.insert(variable_sens, 1f64)
     // type_level_sensitivity_context.insert(variable_type, variable_sens)
 
-    let pair_left = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64)))
-    let pair_right = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64)))
+    let pair_left = make_type(&mut type_map
+        Type::TypeWithSec(
+            type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64)))
+            label: Label(name: "L1")
+            epsilon: EpsilonId(id: 0)
+    ))
+    let pair_right = make_type(&mut type_map
+        Type::TypeWithSec(
+            type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64)))
+            label: Label(name: "L2")
+            epsilon: EpsilonId(id: 1)
+    ))
     let pairs = make_type(&mut type_map, Type::Pair(left: pair_left, right: pair_right))
 
     let list_sens = SensitivityId(id: 1)
