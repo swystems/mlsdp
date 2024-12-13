@@ -48,6 +48,8 @@ enum Epsilon {
     RuntimeVar(name: String)
     Min(a: EpsilonId, b: EpsilonId)
     Max(a: EpsilonId, b: EpsilonId)
+    Subtract(a: EpsilonId, b: EpsilonId)
+    Multiply(a: EpsilonId, b: EpsilonId)
 }
 
 struct Label implements(Equal<Label>, Hashable, FromStringLiteral) {
@@ -178,13 +180,10 @@ class LabelLattice {
 
         // No direct path, try to find a path through a common ancestor
         let common_ancestor = .join(from, to)
-        eprintln("No direct path from {} to {}, trying through {}", from, to, common_ancestor)
         guard .best_path_for(from, to: common_ancestor, epsilon) is Some(fpc)
             and .best_path_for(from: common_ancestor, to, epsilon) is Some(cpt)
             else { return None }
         
-        eprintln("Found common ancestor path: {} -> {} -> {}", from, common_ancestor, to)
-
         let (from_path, from_cost) = fpc
         let (common_path, common_cost) = cpt
         return (from_path.union_(common_path), from_cost + common_cost)
@@ -319,7 +318,7 @@ boxed enum Expression {
     IntLiteral(value: i64)
     Variable(name: String)
     Noise(expr: Expression, epsilon: EpsilonId)
-    Declassify(expr: Expression, source_epsilon: EpsilonId, target_label: Label, target_epsilon: EpsilonId)
+    Declassify(expr: Expression, source_epsilon: EpsilonId, target_label: Label, target_epsilon: EpsilonId, used_epsilon: EpsilonId? = None)
     Subscript(expr: Expression, index: Expression)
     Operation(op: Operation, operands: Array<Expression>)
 
@@ -337,7 +336,7 @@ boxed enum Expression {
             IntLiteral(value) => Expression::IntLiteral(type: sens, value)
             Variable(name) => Expression::Variable(type: sens, name)
             Noise(expr, epsilon) => Expression::Noise(type: sens, expr, epsilon)
-            Declassify(expr, source_epsilon, target_label, target_epsilon) => Expression::Declassify(type: sens, expr, source_epsilon, target_label, target_epsilon)
+            Declassify(expr, source_epsilon, target_label, target_epsilon, used_epsilon) => Expression::Declassify(type: sens, expr, source_epsilon, target_label, target_epsilon, used_epsilon)
             Subscript(expr, index) => Expression::Subscript(type: sens, expr, index)
             Operation(op, operands) => Expression::Operation(type: sens, op, operands)
         }
@@ -392,12 +391,12 @@ boxed enum Expression {
         Noise(expr, epsilon) => {
             abort()
         }
-        Declassify(expr, source_epsilon, target_label, target_epsilon) => format(
-            "{: >{}}declassify(to={}, eps={}) type={} sens=s{}*{}\n{}"
+        Declassify(expr, source_epsilon, target_label, used_epsilon) => format(
+            "{: >{}}declassify(to={}, used eps={}) type={} sens=s{}*{}\n{}"
             ""
             indent
             target_label.name
-            target_epsilon.id
+            used_epsilon
             type_map[.type.value].render(type_map)
             .type.sensitivity?.id
             .type.sensitivity_multiplier
@@ -780,7 +779,20 @@ fn typecheck(
 
         println("Path from {} to {}: {} (cost = {})", type_map[checked_expr.type.value].label(lattice), label, path, cost)
         let type = make_type(type_map, Type::TypeWithSec(type: checked_expr.type.value, label, epsilon: target_epsilon))
-        yield Expression::Declassify(expr: checked_expr, source_epsilon, target_label: label, target_epsilon).with_type(
+        let used_eps_id = EpsilonId(id: epsilon_context.map.size() as! u64)
+        let used_eps_multiplier_id = EpsilonId(id: (epsilon_context.map.size() + 1) as! u64)
+        epsilon_context.insert(used_eps_id, Epsilon::Multiply(a: source_epsilon, b: used_eps_multiplier_id))
+        epsilon_context.insert(used_eps_multiplier_id, Epsilon::Fixed(cost))
+        eprintln("Will use eps {} ({} * {})", used_eps_id, source_epsilon, used_eps_multiplier_id)
+        
+
+        yield Expression::Declassify(
+            expr: checked_expr
+            source_epsilon
+            target_label: label
+            target_epsilon
+            used_epsilon: used_eps_id
+        ).with_type(
             type
             sensitivity: checked_expr.type.sensitivity
             sensitivity_multiplier: checked_expr.type.sensitivity_multiplier
@@ -1056,6 +1068,8 @@ fn main() {
 
     eprintln("Sensitivity context:")
     sensitivity_context.dump()
+    eprintln("Epsilon context:")
+    epsilon_context.dump()
 
     println("{}", checked.to_tree(&type_map))
 }
