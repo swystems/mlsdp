@@ -68,8 +68,8 @@ class Fnv {
 }
 
 class LabelLattice {
-    public top: Label
-    public bottom: Label
+    public tops: [Label]
+    public bottoms: [Label]
     public hierarchy: [Label:[Label]]
     public epsilon_map: [Label:Epsilon]
     // from -> to -> (epsilon -> multiplier for result)
@@ -81,8 +81,8 @@ class LabelLattice {
         anon epsilon_map: [Label:Epsilon]
         anon map_direct: &fn(from: Label, to: Label, epsilon: Epsilon) -> f64
     ) throws -> LabelLattice {
-        mut top: Label? = None
-        mut bottom: Label? = None
+        mut tops: [Label] = []
+        mut bottoms: [Label] = []
         mut map: [Label:[Label:Fnv]] = [:]
         for label in hierarchy.keys() {
             let dict: [Label:Fnv] = [:]
@@ -91,11 +91,7 @@ class LabelLattice {
 
         for (label, lessers) in hierarchy {
             if lessers.size() == 0 {
-                if bottom is Some(value) {
-                    eprintln("Multiple bottom labels: {} and {}", bottom!, label)
-                    abort()
-                }
-                bottom = label
+                bottoms.push(label)
             }
             for lesser in lessers {
                 map[lesser].set(label, Fnv(func: fn[&map_direct, lesser, label](anon epsilon: Epsilon) => map_direct(from: lesser, to: label, epsilon)))
@@ -105,20 +101,38 @@ class LabelLattice {
         for (label, _) in hierarchy {
             // find top (no entry has this label as a lesser)
             if map.get(label)!.is_empty() {
-                top = label
-                break
+                tops.push(label)
             }
         }
 
-        return LabelLattice(top: top!, bottom: bottom!, hierarchy, epsilon_map, map)
+        return LabelLattice(tops: tops, bottoms: bottoms, hierarchy, epsilon_map, map)
     }
 
     public fn join(this, anon a: Label, anon b: Label) throws -> Label {
-        let a_ancestors = .hierarchy[a]
-        let b_ancestors = .hierarchy[b]
+        let a_ancestors = .ancestors(a)
+        if a_ancestors.contains(b) { return b }
+
+        let b_ancestors = .ancestors(b)
+        if b_ancestors.contains(a) { return a }
+
         return fold(a_ancestors.intersection(b_ancestors),
             &fn[this](anon acc: Label, anon x: &Label) throws -> Label => match .hierarchy[acc].contains(*x) { true => *x, false => acc }
         )
+    }
+
+    public fn ancestors(this, anon label: Label) -> [Label] {
+        mut open: [Label] = [label]
+        mut closed: [Label] = []
+        while open.size() > 0 {
+            let current = open.pop()!
+            closed.push(current)
+            for parent in .hierarchy[current] {
+                if not closed.contains(parent) and not open.contains(parent) {
+                    open.push(parent)
+                }
+            }
+        }
+        return closed[1..].to_array()
     }
 
     public fn best_path_for(
@@ -131,6 +145,10 @@ class LabelLattice {
         mut closed: [Label] = []
         mut costs: [Label:f64] = [from: 0f64]
         mut parents: [Label:Label] = [:]
+
+        if .ancestors(from).contains(to) {
+            return ([from, to], 0.0f64)
+        }
 
         while open.size() > 0 {
             let current = fold(open,
@@ -158,7 +176,38 @@ class LabelLattice {
             }
         }
 
-        return None
+        // No direct path, try to find a path through a common ancestor
+        let common_ancestor = .join(from, to)
+        eprintln("No direct path from {} to {}, trying through {}", from, to, common_ancestor)
+        guard .best_path_for(from, to: common_ancestor, epsilon) is Some(fpc)
+            and .best_path_for(from: common_ancestor, to, epsilon) is Some(cpt)
+            else { return None }
+        
+        eprintln("Found common ancestor path: {} -> {} -> {}", from, common_ancestor, to)
+
+        let (from_path, from_cost) = fpc
+        let (common_path, common_cost) = cpt
+        return (from_path.union_(common_path), from_cost + common_cost)
+    }
+
+    fn tree(this, anon label: Label, anon builder: &mut StringBuilder, anon indent: usize = 0) throws {
+        builder.appendff("{: >{}}{}\n", "", indent, label)
+        for lesser in .hierarchy[label] {
+            .tree(lesser, builder, indent: indent + 2)
+        }
+    }
+
+    public fn render(this) throws -> String {
+        mut builder = StringBuilder::create()
+        builder.append("Lattice:\n")
+        for top in this.tops {
+            .tree(top, &mut builder)
+        }
+        builder.append("Epsilon map:\n")
+        for (label, epsilon) in this.epsilon_map {
+            builder.appendff("  {}: {}\n", label, epsilon)
+        }
+        return builder.to_string()
     }
 }
 
@@ -238,7 +287,7 @@ boxed enum Type {
 
     fn label(this, lattice: &LabelLattice) -> Label => match this {
         TypeWithSec(label) => label
-        else => lattice.bottom
+        else => lattice.bottoms[0]
     }
 
     fn render(this, anon type_map: &[TypeId: Type]) throws -> String => match this {
@@ -909,9 +958,10 @@ fn main() {
     let map_direct = fn(anon from: Label, anon to: Label, anon available_epsilon: Epsilon) -> f64 => 1.0f64 // todo!
     mut lattice = LabelLattice::make(
         hierarchy: [
-            "Public": [],
-            "L1": ["Public"],
+            "Public": []
+            "L1": ["Public"]
             "L2": ["L1"]
+            "L3": ["Public"]
         ] as! [Label:[Label]]
         epsilon_map: [
             "Public": Epsilon::Fixed(0f64)
@@ -920,8 +970,6 @@ fn main() {
         ] as! [Label:Epsilon]
         &map_direct
     )
-
-    eprintln("Lattice: {}", lattice)
 
     epsilon_context.insert(EpsilonId(id: 0), Epsilon::Fixed(1f64))
     epsilon_context.insert(EpsilonId(id: 1), Epsilon::Fixed(1f64))
@@ -935,7 +983,7 @@ fn main() {
     let pair_left = make_type(&mut type_map
         Type::TypeWithSec(
             type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64)))
-            label: Label(name: "L1")
+            label: Label(name: "L3")
             epsilon: EpsilonId(id: 0)
     ))
     let pair_right = make_type(&mut type_map
@@ -1003,6 +1051,8 @@ fn main() {
         &mut sensitivity_context
         statement
     )
+
+    eprintln("{}", lattice.render())
 
     eprintln("Sensitivity context:")
     sensitivity_context.dump()
