@@ -45,14 +45,18 @@ struct EpsilonId { id: u64 }
 
 enum Epsilon {
     Fixed(f64)
+    RuntimeVar(name: String)
     Min(a: EpsilonId, b: EpsilonId)
     Max(a: EpsilonId, b: EpsilonId)
 }
 
-struct Label implements(Equal<Label>, Hashable) {
+struct Label implements(Equal<Label>, Hashable, FromStringLiteral) {
     name: String
     fn equals(this, anon other: Label) -> bool => .name == other.name
     fn hash(this) -> u32 => .name.hash()
+    fn from_string_literal(anon s: StringView) -> Label {
+        return Label(name: format("{}", s))
+    }
 }
 
 class Fnv {
@@ -80,14 +84,12 @@ class LabelLattice {
         mut top: Label? = None
         mut bottom: Label? = None
         mut map: [Label:[Label:Fnv]] = [:]
+        for label in hierarchy.keys() {
+            let dict: [Label:Fnv] = [:]
+            map.set(label, dict)
+        }
+
         for (label, lessers) in hierarchy {
-            if lessers.size() == 0 {
-                if top is Some(value) {
-                    eprintln("Multiple top labels: {} and {}", top!, label)
-                    abort()
-                }
-                top = label
-            }
             if lessers.size() == 0 {
                 if bottom is Some(value) {
                     eprintln("Multiple bottom labels: {} and {}", bottom!, label)
@@ -96,7 +98,15 @@ class LabelLattice {
                 bottom = label
             }
             for lesser in lessers {
-                map[label].set(lesser, Fnv(func: fn[&map_direct, lesser, label](anon epsilon: Epsilon) => map_direct(from: lesser, to: label, epsilon)))
+                map[lesser].set(label, Fnv(func: fn[&map_direct, lesser, label](anon epsilon: Epsilon) => map_direct(from: lesser, to: label, epsilon)))
+            }
+        }
+
+        for (label, _) in hierarchy {
+            // find top (no entry has this label as a lesser)
+            if map.get(label)!.is_empty() {
+                top = label
+                break
             }
         }
 
@@ -116,8 +126,7 @@ class LabelLattice {
         from: Label
         to: Label
         epsilon: Epsilon
-    ) throws -> [Label] {
-        // A* search with cost from map[current][next](epsilon)
+    ) throws -> ([Label], f64)? {
         mut open: [Label] = [from]
         mut closed: [Label] = []
         mut costs: [Label:f64] = [from: 0f64]
@@ -132,7 +141,7 @@ class LabelLattice {
                 while not result[0].equals(from) {
                     result.insert(before_index: 0, value: parents[result[0]])
                 }
-                return result
+                return (result, costs[to])
             }
 
             open = open.difference([current])
@@ -149,8 +158,7 @@ class LabelLattice {
             }
         }
 
-        eprintln("No path found from {} to {}", from, to)
-        abort()
+        return None
     }
 }
 
@@ -226,6 +234,11 @@ boxed enum Type {
         Pair => 2
         TypeWithSec(type) => type_map[type].element_count(type_map)
         else => 1
+    }
+
+    fn label(this, lattice: &LabelLattice) -> Label => match this {
+        TypeWithSec(label) => label
+        else => lattice.bottom
     }
 
     fn render(this, anon type_map: &[TypeId: Type]) throws -> String => match this {
@@ -331,13 +344,15 @@ boxed enum Expression {
             abort()
         }
         Declassify(expr, source_epsilon, target_label, target_epsilon) => format(
-            "{: >{}}declassify({}) type={} sens=s{}*{}"
+            "{: >{}}declassify(to={}, eps={}) type={} sens=s{}*{}\n{}"
             ""
             indent
-            expr.to_tree(type_map, indent: 0)
+            target_label.name
+            target_epsilon.id
             type_map[.type.value].render(type_map)
             .type.sensitivity?.id
             .type.sensitivity_multiplier
+            expr.to_tree(type_map, indent: indent + 2)
         )
         Subscript(
             expr
@@ -644,6 +659,7 @@ fn sens_merge(
 }
 
 fn typecheck(
+    lattice: &LabelLattice
     type_map: &mut [TypeId:Type]
     type_context: &mut Context<String, TypeId>
     type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
@@ -660,8 +676,8 @@ fn typecheck(
         ).add_sensitivity(sensitivity_context)
     }
     Subscript(expr, index) => {
-        let checked_expr = typecheck(type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
-        let checked_index = typecheck(type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, index)
+        let checked_expr = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+        let checked_index = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, index)
         mut expr_type = type_map[checked_expr.type.value]
         let unchecked_expr = Expression::Subscript(expr: checked_expr, index: checked_index)
         mut wrap_with_sec = fn(anon type: TypeId) throws => type
@@ -700,14 +716,31 @@ fn typecheck(
         yield result.add_sensitivity(sensitivity_context)
     }
     Declassify(expr, source_epsilon, target_label, target_epsilon) => {
-        let checked_expr = typecheck(type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+        let checked_expr = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
         let label = target_label
+        guard lattice.best_path_for(
+            from: type_map[checked_expr.type.value].label(lattice)
+            to: label
+            epsilon: epsilon_context.lookup(target_epsilon)
+        ) is Some(pc) else {
+            eprintln("Going from {} to {} is either not a declassify, or is not possible", type_map[checked_expr.type.value].label(lattice), label)
+            return checked_expr
+        }
+
+        let (path, cost) = pc
+
+        println("Path from {} to {}: {} (cost = {})", type_map[checked_expr.type.value].label(lattice), label, path, cost)
         let type = make_type(type_map, Type::TypeWithSec(type: checked_expr.type.value, label, epsilon: target_epsilon))
-        yield Expression::Declassify(expr: checked_expr, source_epsilon, target_label: label, target_epsilon).with_type(type)
+        yield Expression::Declassify(expr: checked_expr, source_epsilon, target_label: label, target_epsilon).with_type(
+            type
+            sensitivity: checked_expr.type.sensitivity
+            sensitivity_multiplier: checked_expr.type.sensitivity_multiplier
+        )
     }
     Operation(op, operands) => {
         let checked_operands = operands.map(
             &fn[
+                &lattice
                 &mut type_map
                 &mut type_context
                 &mut type_level_sensitivity_context
@@ -715,7 +748,7 @@ fn typecheck(
                 &mut sensitivity_context
             ](anon x: &Expression) throws -> (Expression, Context<SensitivityId, f64>) {
                 mut new_sensitivity_context = child_context(*sensitivity_context)
-                let result = typecheck(type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context: &mut new_sensitivity_context, *x)
+                let result = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context: &mut new_sensitivity_context, *x)
                 return (result, new_sensitivity_context)
             }
         )
@@ -771,6 +804,7 @@ fn typecheck(
 }
 
 fn typecheck(
+    lattice: &LabelLattice
     type_map: &mut [TypeId:Type]
     type_context: &mut Context<String, TypeId>
     type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
@@ -781,11 +815,12 @@ fn typecheck(
     Expression(
         expr
     ) => {
-        let checked = typecheck(type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+        let checked = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
         yield Statement::Expression(type: checked.type, checked)
     }
     ForEach(var, index, list, body) => {
         let list_expr = typecheck(
+            lattice
             type_map
             type_context
             type_level_sensitivity_context
@@ -825,6 +860,7 @@ fn typecheck(
         }
 
         let body_stmt = typecheck(
+            lattice
             type_map
             type_context: &mut new_type_context
             type_level_sensitivity_context
@@ -870,6 +906,22 @@ fn main() {
     mut type_level_sensitivity_context: Context<TypeId, SensitivityId> = Context(map: [:])
     mut epsilon_context: Context<EpsilonId, Epsilon> = Context(map: [:])
     mut sensitivity_context: Context<SensitivityId, f64> = Context(map: [:])
+    let map_direct = fn(anon from: Label, anon to: Label, anon available_epsilon: Epsilon) -> f64 => 1.0f64 // todo!
+    mut lattice = LabelLattice::make(
+        hierarchy: [
+            "Public": [],
+            "L1": ["Public"],
+            "L2": ["L1"]
+        ] as! [Label:[Label]]
+        epsilon_map: [
+            "Public": Epsilon::Fixed(0f64)
+            "L1": Epsilon::RuntimeVar(name: "e1")
+            "L2": Epsilon::RuntimeVar(name: "e2")
+        ] as! [Label:Epsilon]
+        &map_direct
+    )
+
+    eprintln("Lattice: {}", lattice)
 
     epsilon_context.insert(EpsilonId(id: 0), Epsilon::Fixed(1f64))
     epsilon_context.insert(EpsilonId(id: 1), Epsilon::Fixed(1f64))
@@ -910,7 +962,6 @@ fn main() {
         op: Operation::Mul
         operands: [
             e1,
-    // Declassify(expr: Expression, source_epsilon: EpsilonId, target_label: Label, target_epsilon: EpsilonId)
             Expression::Declassify(
                 expr: Expression::Subscript(
                     expr: e2
@@ -943,7 +994,15 @@ fn main() {
         body: Statement::Expression(expr)
     )
 
-    let checked = typecheck(&mut type_map, &mut type_context, &mut type_level_sensitivity_context, &mut epsilon_context, &mut sensitivity_context, statement)
+    let checked = typecheck(
+        &lattice
+        &mut type_map
+        &mut type_context
+        &mut type_level_sensitivity_context
+        &mut epsilon_context
+        &mut sensitivity_context
+        statement
+    )
 
     eprintln("Sensitivity context:")
     sensitivity_context.dump()
