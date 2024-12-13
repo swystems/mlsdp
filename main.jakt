@@ -7,6 +7,38 @@ import extern "AK/Math.h" {
     extern fn sqrt<T requires(Floating)>(anon x: T) -> T
 }
 
+trait SetTheoric {
+    fn union_(this, anon other: Self) -> Self
+    fn intersection(this, anon other: Self) -> Self
+    fn difference(this, anon other: Self) -> Self
+    fn contains(this, anon element: Self) -> bool
+}
+
+type Array implements(SetTheoric) {
+    [[inline()]]
+    fn union_(this, anon other: Array<T>) -> Array<T> {
+        mut result = this[..].to_array()
+        result.push_values(&other)
+        return result
+    }
+    [[inline()]]
+    fn intersection(this, anon other: Array<T>) -> Array<T> {
+        mut result: [T] = []
+        for x in this {
+            if other.contains(x) { result.push(x) }
+        }
+        return result
+    }
+    [[inline()]]
+    fn difference(this, anon other: Array<T>) -> Array<T> {
+        mut result: [T] = []
+        for x in this {
+            if not other.contains(x) { result.push(x) }
+        }
+        return result
+    }
+}
+
 struct SensitivityId { id: u64 }
 struct TypeId { id: u64 }
 struct EpsilonId { id: u64 }
@@ -15,6 +47,111 @@ enum Epsilon {
     Fixed(f64)
     Min(a: EpsilonId, b: EpsilonId)
     Max(a: EpsilonId, b: EpsilonId)
+}
+
+struct Label implements(Equal<Label>, Hashable) {
+    name: String
+    fn equals(this, anon other: Label) -> bool => .name == other.name
+    fn hash(this) -> u32 => .name.hash()
+}
+
+class Fnv {
+    public func: fn(anon epsilon: Epsilon) -> f64
+    public fn call(this, anon epsilon: Epsilon) -> f64 {
+        let f = &.func
+        return f(epsilon)
+    }
+}
+
+class LabelLattice {
+    public top: Label
+    public bottom: Label
+    public hierarchy: [Label:[Label]]
+    public epsilon_map: [Label:Epsilon]
+    // from -> to -> (epsilon -> multiplier for result)
+    public map: [Label:[Label:Fnv]]
+
+    [[stores_arguments(map_direct:"return")]]
+    public fn make(
+        anon hierarchy: [Label:[Label]]
+        anon epsilon_map: [Label:Epsilon]
+        anon map_direct: &fn(from: Label, to: Label, epsilon: Epsilon) -> f64
+    ) throws -> LabelLattice {
+        mut top: Label? = None
+        mut bottom: Label? = None
+        mut map: [Label:[Label:Fnv]] = [:]
+        for (label, lessers) in hierarchy {
+            if lessers.size() == 0 {
+                if top is Some(value) {
+                    eprintln("Multiple top labels: {} and {}", top!, label)
+                    abort()
+                }
+                top = label
+            }
+            if lessers.size() == 0 {
+                if bottom is Some(value) {
+                    eprintln("Multiple bottom labels: {} and {}", bottom!, label)
+                    abort()
+                }
+                bottom = label
+            }
+            for lesser in lessers {
+                map[label].set(lesser, Fnv(func: fn[&map_direct, lesser, label](anon epsilon: Epsilon) => map_direct(from: lesser, to: label, epsilon)))
+            }
+        }
+
+        return LabelLattice(top: top!, bottom: bottom!, hierarchy, epsilon_map, map)
+    }
+
+    public fn join(this, anon a: Label, anon b: Label) throws -> Label {
+        let a_ancestors = .hierarchy[a]
+        let b_ancestors = .hierarchy[b]
+        return fold(a_ancestors.intersection(b_ancestors),
+            &fn[this](anon acc: Label, anon x: &Label) throws -> Label => match .hierarchy[acc].contains(*x) { true => *x, false => acc }
+        )
+    }
+
+    public fn best_path_for(
+        this
+        from: Label
+        to: Label
+        epsilon: Epsilon
+    ) throws -> [Label] {
+        // A* search with cost from map[current][next](epsilon)
+        mut open: [Label] = [from]
+        mut closed: [Label] = []
+        mut costs: [Label:f64] = [from: 0f64]
+        mut parents: [Label:Label] = [:]
+
+        while open.size() > 0 {
+            let current = fold(open,
+                &fn[this, &costs](anon acc: Label, anon x: &Label) throws -> Label => match costs[x] < costs[acc] { true => *x, false => acc }
+            )
+            if current == to {
+                mut result: [Label] = [to]
+                while not result[0].equals(from) {
+                    result.insert(before_index: 0, value: parents[result[0]])
+                }
+                return result
+            }
+
+            open = open.difference([current])
+            closed.push(current)
+
+            for next in .map[current].keys() {
+                if closed.contains(next) { continue }
+                let cost = costs[current] + .map[current][next].call(epsilon) // Assume epsilon = 1 for now
+                if not open.contains(next) or cost < costs[next] {
+                    costs.set(next, cost)
+                    parents.set(next, current)
+                    if not open.contains(next) { open.push(next) }
+                }
+            }
+        }
+
+        eprintln("No path found from {} to {}", from, to)
+        abort()
+    }
 }
 
 type SensitivityId implements(Hashable, Equal<SensitivityId>) {
@@ -31,11 +168,7 @@ type EpsilonId implements(Hashable, Equal<EpsilonId>) {
 }
 
 trait Map<T> { fn map<U>(this, anon f: &fn(anon x: &T) throws -> U) throws -> [U] }
-trait Fold<T> {
-    fn fold<U>(this, anon init: U, anon f: &fn(anon acc: U, anon x: &T) throws -> U) throws -> U
-    fn fold(this, anon f: &fn(anon acc: T, anon x: &T) throws -> T) throws -> T
-}
-type Array implements(Map<T>, Fold<T>) {
+type Array implements(Map<T>) {
     [[inline()]]
     fn map<U>(this, anon f: &fn(anon x: &T) throws -> U) throws -> [U] {
         mut result: [U] = []
@@ -45,22 +178,17 @@ type Array implements(Map<T>, Fold<T>) {
         }
         return result
     }
-    [[inline()]]
-    fn fold<U>(this, anon init: U, anon f: &fn(anon acc: U, anon x: &T) throws -> U) throws -> U {
-        mut acc = init
-        for x in this {
-            acc = f(acc, &x)
-        }
-        return acc
+}
+
+fn fold<T>(
+    anon list: [T]
+    anon f: &fn(anon acc: T, anon x: &T) throws -> T
+) throws -> T {
+    mut acc = list[0]
+    for x in list[1..] {
+        acc = f(acc, &x)
     }
-    [[inline()]]
-    fn fold(this, anon f: &fn(anon acc: T, anon x: &T) throws -> T) throws -> T {
-        mut acc = this[0]
-        for x in this[1..] {
-            acc = f(acc, &x)
-        }
-        return acc
-    }
+    return acc
 }
 
 fn unchecked() -> TypeId => TypeId(id: 0)
@@ -74,11 +202,6 @@ class SensitivityMapped<T> {
 enum InferredRange<T> {
     Unknown
     Bounded(from: T, to: T)
-}
-
-struct Label implements(Equal<Label>) {
-    name: String
-    fn equals(this, anon other: Label) -> bool => .name == other.name
 }
 
 boxed enum Type {
@@ -207,9 +330,15 @@ boxed enum Expression {
         Noise(expr, epsilon) => {
             abort()
         }
-        Declassify(expr, source_epsilon, target_label, target_epsilon) => {
-            abort()
-        }
+        Declassify(expr, source_epsilon, target_label, target_epsilon) => format(
+            "{: >{}}declassify({}) type={} sens=s{}*{}"
+            ""
+            indent
+            expr.to_tree(type_map, indent: 0)
+            type_map[.type.value].render(type_map)
+            .type.sensitivity?.id
+            .type.sensitivity_multiplier
+        )
         Subscript(
             expr
             index
@@ -570,6 +699,12 @@ fn typecheck(
 
         yield result.add_sensitivity(sensitivity_context)
     }
+    Declassify(expr, source_epsilon, target_label, target_epsilon) => {
+        let checked_expr = typecheck(type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+        let label = target_label
+        let type = make_type(type_map, Type::TypeWithSec(type: checked_expr.type.value, label, epsilon: target_epsilon))
+        yield Expression::Declassify(expr: checked_expr, source_epsilon, target_label: label, target_epsilon).with_type(type)
+    }
     Operation(op, operands) => {
         let checked_operands = operands.map(
             &fn[
@@ -584,16 +719,22 @@ fn typecheck(
                 return (result, new_sensitivity_context)
             }
         )
-        let type = checked_operands.map(
-            &fn(anon x: &(Expression, Context<SensitivityId, f64>)) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) => (x.0.type, x.1)
-        ).fold(
+        let type = fold(
+            checked_operands.map(
+                &fn(
+                    anon x: &(Expression, Context<SensitivityId, f64>)
+                ) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) => (x.0.type, x.1)
+            ),
             &fn[
                 &mut type_map
                 &mut type_context
                 &mut epsilon_context
                 &mut sensitivity_context
                 op
-            ](anon acc: (SensitivityMapped<TypeId>, Context<SensitivityId, f64>), anon x: &(SensitivityMapped<TypeId>, Context<SensitivityId, f64>)) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) {
+            ](
+                anon acc: (SensitivityMapped<TypeId>, Context<SensitivityId, f64>)
+                anon x: &(SensitivityMapped<TypeId>, Context<SensitivityId, f64>)
+            ) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) {
                 let acc_type = type_map[acc.0.value]
                 let x_type = type_map[x.0.value]
                 // FIXME: Implement type unification + sensitivity merging
@@ -601,7 +742,16 @@ fn typecheck(
                     true => x.1.lookup(x.0.sensitivity!)
                     false => 0f64
                 }
-                let sensitivity = sens_merge(acc.0.sensitivity, x.0.sensitivity, op, local_sensitivity, &mut sensitivity_context, &mut type_map, acc_type, x_type)
+                let sensitivity = sens_merge(
+                    acc.0.sensitivity
+                    x.0.sensitivity
+                    op
+                    local_sensitivity
+                    &mut sensitivity_context
+                    &mut type_map
+                    acc_type
+                    x_type
+                )
                 let sens = SensitivityMapped(
                     value: make_type(type_map, merge_bounds(type_map, epsilon_context, acc_type, x_type, op))
                     sensitivity
@@ -615,7 +765,7 @@ fn typecheck(
         yield Expression::Operation(type, op, operands)
     }
     else => {
-        eprintln("Typecheck not implemented for ", expr)
+        eprintln("Typecheck not implemented for {}", expr)
         abort()
     }
 }
@@ -760,9 +910,15 @@ fn main() {
         op: Operation::Mul
         operands: [
             e1,
-            Expression::Subscript(
-                expr: e2
-                index: Expression::IntLiteral(value: 0)
+    // Declassify(expr: Expression, source_epsilon: EpsilonId, target_label: Label, target_epsilon: EpsilonId)
+            Expression::Declassify(
+                expr: Expression::Subscript(
+                    expr: e2
+                    index: Expression::IntLiteral(value: 0)
+                )
+                source_epsilon: EpsilonId(id: 0)
+                target_label: Label(name: "L2")
+                target_epsilon: EpsilonId(id: 1)
             )
         ]
     )
