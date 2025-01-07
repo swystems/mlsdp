@@ -289,6 +289,12 @@ boxed enum Type {
         else => lattice.bottoms[0]
     }
 
+    fn epsilon(this, type_map: &[TypeId:Type]) -> EpsilonId => match this {
+        TypeWithSec(epsilon) => epsilon
+        List(type) => type_map[type].epsilon(type_map)
+        else => EpsilonId(id: 0) // FIXME: This is a hack
+    }
+
     fn render(this, anon type_map: &[TypeId: Type]) throws -> String => match this {
         Unchecked => "unchecked"
         Int(range) => match range {
@@ -321,6 +327,8 @@ boxed enum Expression {
     Declassify(expr: Expression, source_epsilon: EpsilonId, target_label: Label, target_epsilon: EpsilonId, used_epsilon: EpsilonId? = None)
     Subscript(expr: Expression, index: Expression)
     Operation(op: Operation, operands: Array<Expression>)
+    Call(procedure: Procedure, arguments: Array<Expression>)
+    ForEach(var: String, index: String, accum: String, accum_init: Expression, list: Expression, body: Statement)
 
     fn with_type(this, anon type: TypeId, sensitivity: SensitivityId? = None, sensitivity_multiplier: f64 = 1.0) -> Expression {
         mut sens = SensitivityMapped(value: .type.value, sensitivity: .type.sensitivity)
@@ -339,6 +347,8 @@ boxed enum Expression {
             Declassify(expr, source_epsilon, target_label, target_epsilon, used_epsilon) => Expression::Declassify(type: sens, expr, source_epsilon, target_label, target_epsilon, used_epsilon)
             Subscript(expr, index) => Expression::Subscript(type: sens, expr, index)
             Operation(op, operands) => Expression::Operation(type: sens, op, operands)
+            Call(procedure, arguments) => Expression::Call(type: sens, procedure, arguments)
+            ForEach(var, index, accum, accum_init, list, body) => Expression::ForEach(type: sens, var, index, accum, accum_init, list, body)
         }
     }
 
@@ -362,10 +372,12 @@ boxed enum Expression {
             Declassify(expr, source_epsilon, target_label, target_epsilon) => Expression::Declassify(type: sens, expr, source_epsilon, target_label, target_epsilon)
             Subscript(expr, index) => Expression::Subscript(type: sens, expr, index)
             Operation(op, operands) => Expression::Operation(type: sens, op, operands)
+            Call(procedure, arguments) => Expression::Call(type: sens, procedure, arguments)
+            ForEach(var, index, accum, accum_init, list, body) => Expression::ForEach(type: sens, var, index, accum, accum_init, list, body)
         }
     }
 
-    fn to_tree(this, type_map: &[TypeId:Type], indent: usize = 0) throws -> String => match this {
+    fn to_tree(this, type_map: &[TypeId: Type], indent: usize = 0) throws -> String => match this {
         IntLiteral(
             value: x
         ) => format(
@@ -388,9 +400,16 @@ boxed enum Expression {
             .type.sensitivity?.id
             .type.sensitivity_multiplier
         )
-        Noise(expr, epsilon) => {
-            abort()
-        }
+        Noise(expr, epsilon) =>
+            format(
+                "{: >{}}noise({}) type={} sens=s{}*{}\n"
+                ""
+                indent
+                epsilon
+                type_map[.type.value].render(type_map)
+                .type.sensitivity?.id
+                .type.sensitivity_multiplier
+            ) + expr.to_tree(type_map, indent: indent + 2)
         Declassify(expr, source_epsilon, target_label, used_epsilon) => format(
             "{: >{}}declassify(to={}, used eps={}) type={} sens=s{}*{}\n{}"
             ""
@@ -406,14 +425,14 @@ boxed enum Expression {
             expr
             index
         ) => format(
-            "{: >{}}sub({}) {} type={} sens=s{}*{}"
+            "{: >{}}sub({}) type={} sens=s{}*{}\n{}"
             ""
             indent
             index.to_tree(type_map, indent: 0)
-            expr.to_tree(type_map, indent: 0)
             type_map[.type.value].render(type_map)
             .type.sensitivity?.id
             .type.sensitivity_multiplier
+            expr.to_tree(type_map, indent: indent + 2)
         )
         Operation(op, operands) => {
             mut x = format(
@@ -430,6 +449,35 @@ boxed enum Expression {
             }
             yield x
         }
+        Call(procedure, arguments) => {
+            mut x = format(
+                "{: >{}}call({}) type={} sens=s{}*{}"
+                ""
+                indent
+                procedure.name
+                type_map[.type.value].render(type_map)
+                .type.sensitivity?.id
+                .type.sensitivity_multiplier
+            )
+            for argument in arguments {
+                x += "\n" + argument.to_tree(type_map, indent: indent + 2)
+            }
+            yield x
+        }
+        ForEach(var, index, accum, accum_init, list, body) => {
+            mut x = format(
+                "{: >{}}for {} type={} sens=s{}*{}\n{}\n"
+                ""
+                indent
+                var
+                type_map[.type.value].render(type_map)
+                .type.sensitivity?.id
+                .type.sensitivity_multiplier
+                list.to_tree(type_map, indent: indent + 2)
+            )
+            x += body.to_tree(type_map, indent: indent + 2)
+            yield x
+        }
     }
 }
 
@@ -437,11 +485,11 @@ boxed enum Statement {
     type: SensitivityMapped<TypeId> = SensitivityMapped(value: unchecked(), sensitivity: None)
 
     Expression(Expression)
-    ForEach(var: String, index: String, list: Expression, body: Statement)
     Return(Expression)
     IfThenElse(condition: Expression, consequence: Statement, alternative: Statement)
     Assign(var: String, value: Expression)
     Sequence(first: Statement, second: Statement)
+    Ignore
 
     fn with_type(this, anon type: TypeId, sensitivity: SensitivityId? = None, sensitivity_multiplier: f64 = 1.0) -> Statement {
         mut sens = SensitivityMapped(value: .type.value, sensitivity: .type.sensitivity)
@@ -455,30 +503,19 @@ boxed enum Statement {
 
         return match this {
             Expression(expr) => Statement::Expression(type: sens, expr)
-            ForEach(var, index, list, body) => Statement::ForEach(type: sens, var, index, list, body)
             Return(expr) => Statement::Return(type: sens, expr)
             IfThenElse(condition, consequence, alternative) => Statement::IfThenElse(type: sens, condition, consequence, alternative)
             Assign(var, value) => Statement::Assign(type: sens, var, value)
             Sequence(first, second) => Statement::Sequence(type: sens, first, second)
+            Ignore => Statement::Ignore(type: sens)
         }
     }
 
     fn to_tree(this, type_map: &[TypeId: Type], indent: usize = 0) throws -> String => match this {
         Expression(expr) => expr.to_tree(type_map, indent: indent)
-        ForEach(var, index, list, body) =>
-            format(
-                "{: >{}}for {} in [{}] type={} sens=s{}*{}\n"
-                ""
-                indent
-                var
-                list.to_tree(type_map, indent)
-                type_map[.type.value].render(type_map)
-                .type.sensitivity?.id
-                .type.sensitivity_multiplier
-            ) + body.to_tree(type_map, indent: indent + 2)
         Return(expr) =>
             format(
-                "{: >{}}return type={} sens=s{}*{}"
+                "{: >{}}return type={} sens=s{}*{}\n"
                 ""
                 indent
                 type_map[.type.value].render(type_map)
@@ -496,17 +533,18 @@ boxed enum Statement {
             ) + consequence.to_tree(type_map, indent: indent + 2) + "\nelse\n" + alternative.to_tree(type_map, indent: indent + 2)
         Assign(var, value) =>
             format(
-                "{: >{}}{} = {} type={} sens=s{}*{}"
+                "{: >{}}Assign {}\n{}"
                 ""
                 indent
                 var
-                value.to_tree(type_map, indent)
-                type_map[.type.value].render(type_map)
-                .type.sensitivity?.id
-                .type.sensitivity_multiplier
+                value.to_tree(type_map, indent: indent + 2)
             )
-        Sequence(first, second) =>
-            first.to_tree(type_map, indent: indent) + " ; " + second.to_tree(type_map, indent: indent)
+        Sequence(first, second) => {
+            let first_tree = first.to_tree(type_map, indent)
+            let second_tree = second.to_tree(type_map, indent)
+            return first_tree + "\n" + second_tree
+        }
+        Ignore => format("{: >{}}ignore", "", indent)
     }
 }
 
@@ -515,6 +553,17 @@ struct Procedure {
     parameters: [String:SensitivityMapped<TypeId>]
     return_type: TypeId
     body: Statement
+
+    fn to_tree(this, type_map: &[TypeId:Type], indent: usize = 0) throws -> String {
+        mut builder = StringBuilder::create()
+        builder.appendff("{: >{}}Procedure {}(\n", "", indent, this.name)
+        for (name, type) in this.parameters {
+            builder.appendff("{: >{}}  {}: {}\n", "", indent, name, type_map[type.value].render(type_map))
+        }
+        builder.appendff("{: >{}}) -> {}\n", "", indent, type_map[this.return_type].render(type_map))
+        builder.append(this.body.to_tree(type_map, indent: indent + 2))
+        return builder.to_string()
+    }
 }
 
 class Context<K requires(Hashable), V> {
@@ -714,153 +763,298 @@ fn typecheck(
     epsilon_context: &mut Context<EpsilonId, Epsilon>
     sensitivity_context: &mut Context<SensitivityId, f64>
     anon mut expr: Expression
-) throws -> Expression => match expr {
-    IntLiteral(value) => expr.with_type(make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: value, to: value))))
-    Variable(name) => {
-        let type = type_context.lookup(name)
-        yield expr.with_type(
-            type
-            sensitivity: type_level_sensitivity_context.find(type)
-        ).add_sensitivity(sensitivity_context)
-    }
-    Subscript(expr, index) => {
-        let checked_expr = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
-        let checked_index = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, index)
-        mut expr_type = type_map[checked_expr.type.value]
-        let unchecked_expr = Expression::Subscript(expr: checked_expr, index: checked_index)
-        mut wrap_with_sec = fn(anon type: TypeId) throws => type
-
-        if expr_type is TypeWithSec(type, label, epsilon) {
-            wrap_with_sec = fn[
-                &mut type_map
-                label
-                epsilon
-            ](anon type: TypeId) throws -> TypeId => make_type(type_map, Type::TypeWithSec(type, label, epsilon))
-            expr_type = type_map[type]
+) throws -> Expression {
+    return match expr {
+        IntLiteral(value) => expr.with_type(make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: value, to: value))))
+        Variable(name) => {
+            let type = type_context.lookup(name)
+            yield expr.with_type(
+                type
+                sensitivity: type_level_sensitivity_context.find(type)
+            ).add_sensitivity(sensitivity_context)
         }
+        Subscript(expr, index) => {
+            let checked_expr = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+            let checked_index = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, index)
+            mut expr_type = type_map[checked_expr.type.value]
+            let unchecked_expr = Expression::Subscript(expr: checked_expr, index: checked_index)
+            mut wrap_with_sec = fn(anon type: TypeId) throws => type
 
-        mut result = match expr_type {
-            List(type, size) => unchecked_expr.with_type(wrap_with_sec(type))
-            Pair(left, right) => match checked_index {
-                IntLiteral(value) => match value {
-                    0 => unchecked_expr.with_type(wrap_with_sec(left))
-                    1 => unchecked_expr.with_type(wrap_with_sec(right))
+            if expr_type is TypeWithSec(type, label, epsilon) {
+                wrap_with_sec = fn[
+                    &mut type_map
+                    label
+                    epsilon
+                ](anon type: TypeId) throws -> TypeId => make_type(type_map, Type::TypeWithSec(type, label, epsilon))
+                expr_type = type_map[type]
+            }
+
+            mut result = match expr_type {
+                List(type, size) => unchecked_expr.with_type(wrap_with_sec(type))
+                Pair(left, right) => match checked_index {
+                    IntLiteral(value) => match value {
+                        0 => unchecked_expr.with_type(wrap_with_sec(left))
+                        1 => unchecked_expr.with_type(wrap_with_sec(right))
+                        else => {
+                            eprintln("Invalid index for pair: {}", value)
+                            abort()
+                        }
+                    }
                     else => {
-                        eprintln("Invalid index for pair: {}", value)
+                        eprintln("Invalid index type for pair: {}", checked_index)
                         abort()
                     }
                 }
                 else => {
-                    eprintln("Invalid index type for pair: {}", checked_index)
+                    eprintln("Invalid subscript type: {}", expr_type)
                     abort()
                 }
             }
-            else => {
-                eprintln("Invalid subscript type: {}", expr_type)
-                abort()
-            }
+
+            yield result.add_sensitivity(sensitivity_context)
         }
-
-        yield result.add_sensitivity(sensitivity_context)
-    }
-    Declassify(expr, source_epsilon, target_label, target_epsilon) => {
-        let checked_expr = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
-        let label = target_label
-        guard lattice.best_path_for(
-            from: type_map[checked_expr.type.value].label(lattice)
-            to: label
-            epsilon: epsilon_context.lookup(target_epsilon)
-        ) is Some(pc) else {
-            eprintln("Going from {} to {} is either not a declassify, or is not possible", type_map[checked_expr.type.value].label(lattice), label)
-            return checked_expr
-        }
-
-        let (path, cost) = pc
-
-        println("Path from {} to {}: {} (cost = {})", type_map[checked_expr.type.value].label(lattice), label, path, cost)
-        let type = make_type(type_map, Type::TypeWithSec(type: checked_expr.type.value, label, epsilon: target_epsilon))
-        let used_eps_id = EpsilonId(id: epsilon_context.map.size() as! u64)
-        let used_eps_multiplier_id = EpsilonId(id: (epsilon_context.map.size() + 1) as! u64)
-        epsilon_context.insert(used_eps_id, Epsilon::Multiply(a: source_epsilon, b: used_eps_multiplier_id))
-        epsilon_context.insert(used_eps_multiplier_id, Epsilon::Fixed(cost))
-        eprintln("Will use eps {} ({} * {})", used_eps_id, source_epsilon, used_eps_multiplier_id)
-        
-
-        yield Expression::Declassify(
-            expr: checked_expr
-            source_epsilon
-            target_label: label
-            target_epsilon
-            used_epsilon: used_eps_id
-        ).with_type(
-            type
-            sensitivity: checked_expr.type.sensitivity
-            sensitivity_multiplier: checked_expr.type.sensitivity_multiplier
-        )
-    }
-    Operation(op, operands) => {
-        let checked_operands = operands.map(
-            &fn[
-                &lattice
-                &mut type_map
-                &mut type_context
-                &mut type_level_sensitivity_context
-                &mut epsilon_context
-                &mut sensitivity_context
-            ](anon x: &Expression) throws -> (Expression, Context<SensitivityId, f64>) {
-                mut new_sensitivity_context = child_context(*sensitivity_context)
-                let result = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context: &mut new_sensitivity_context, *x)
-                return (result, new_sensitivity_context)
+        Declassify(expr, source_epsilon, target_label, target_epsilon) => {
+            let checked_expr = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+            let label = target_label
+            guard lattice.best_path_for(
+                from: type_map[checked_expr.type.value].label(lattice)
+                to: label
+                epsilon: epsilon_context.lookup(target_epsilon)
+            ) is Some(pc) else {
+                eprintln("Going from {} to {} is either not a declassify, or is not possible", type_map[checked_expr.type.value].label(lattice), label)
+                return checked_expr
             }
-        )
-        let type = fold(
-            checked_operands.map(
-                &fn(
-                    anon x: &(Expression, Context<SensitivityId, f64>)
-                ) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) => (x.0.type, x.1)
-            ),
-            &fn[
-                &mut type_map
-                &mut type_context
-                &mut epsilon_context
-                &mut sensitivity_context
-                op
-            ](
-                anon acc: (SensitivityMapped<TypeId>, Context<SensitivityId, f64>)
-                anon x: &(SensitivityMapped<TypeId>, Context<SensitivityId, f64>)
-            ) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) {
-                let acc_type = type_map[acc.0.value]
-                let x_type = type_map[x.0.value]
-                // FIXME: Implement type unification + sensitivity merging
-                let local_sensitivity = match x.0.sensitivity.has_value() {
-                    true => x.1.lookup(x.0.sensitivity!)
-                    false => 0f64
-                }
-                let sensitivity = sens_merge(
-                    acc.0.sensitivity
-                    x.0.sensitivity
-                    op
-                    local_sensitivity
-                    &mut sensitivity_context
+
+            let (path, cost) = pc
+
+            println("Path from {} to {}: {} (cost = {})", type_map[checked_expr.type.value].label(lattice), label, path, cost)
+            let type = make_type(type_map, Type::TypeWithSec(type: checked_expr.type.value, label, epsilon: target_epsilon))
+            let used_eps_id = EpsilonId(id: epsilon_context.map.size() as! u64)
+            let used_eps_multiplier_id = EpsilonId(id: (epsilon_context.map.size() + 1) as! u64)
+            epsilon_context.insert(used_eps_id, Epsilon::Multiply(a: source_epsilon, b: used_eps_multiplier_id))
+            epsilon_context.insert(used_eps_multiplier_id, Epsilon::Fixed(cost))
+            eprintln("Will use eps {} ({} * {})", used_eps_id, source_epsilon, used_eps_multiplier_id)
+            
+
+            yield Expression::Declassify(
+                expr: checked_expr
+                source_epsilon
+                target_label: label
+                target_epsilon
+                used_epsilon: used_eps_id
+            ).with_type(
+                type
+                sensitivity: checked_expr.type.sensitivity
+                sensitivity_multiplier: checked_expr.type.sensitivity_multiplier
+            )
+        }
+        Noise(expr, epsilon) => {
+            let checked_expr = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+            // {\frac
+            //     {\begin{array}{ccc}%
+            //         L : \ell \quad
+            //         \sensitivityContext, \epsilonContext, \Gamma \vdash x \hasTypeWithSens{\symbolic{s}} \tau^L_{\epsilon_1} \quad
+            //         \epsilon_2 \leq \epsilon_1 \\
+            //         \Gamma^\prime = \Gamma[x \mapsto \tau^L_{\epsilon_1 - \epsilon_2}] \quad
+            //         \epsilonContext^\prime = \epsilonContext[\epsilon_1 \mapsto \epsilon_1 - \epsilon_2]
+            //     \end{array}}
+            //     {\epsilonContext, \Gamma \vdash \mathsf{noise}(x, \epsilon_2) \hasTypeWithSens{\symbolic{s}} \tau^L_{\epsilon_2} \quad
+            //     \epsilonContext^\prime, \Gamma^\prime \vdash x \hasTypeWithSens{\symbolic{s}} \tau^L_{\epsilon_1}}}^\mathcomment{Noise}
+            let expr_type = type_map[checked_expr.type.value]
+            let epsilon2 = type_map[checked_expr.type.value].epsilon(&type_map)
+            let new_epsilon = EpsilonId(id: epsilon_context.map.size() as! u64)
+            epsilon_context.insert(new_epsilon, Epsilon::Subtract(a: epsilon, b: epsilon2))
+            let new_type = make_type(type_map, Type::TypeWithSec(type: checked_expr.type.value, label: expr_type.label(lattice), epsilon: new_epsilon))
+            yield Expression::Noise(expr: checked_expr, epsilon).with_type(new_type)
+        }
+        Operation(op, operands) => {
+            let checked_operands = operands.map(
+                &fn[
+                    &lattice
                     &mut type_map
-                    acc_type
-                    x_type
+                    &mut type_context
+                    &mut type_level_sensitivity_context
+                    &mut epsilon_context
+                    &mut sensitivity_context
+                ](anon x: &Expression) throws -> (Expression, Context<SensitivityId, f64>) {
+                    mut new_sensitivity_context = child_context(*sensitivity_context)
+                    let result = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context: &mut new_sensitivity_context, *x)
+                    return (result, new_sensitivity_context)
+                }
+            )
+            let type = fold(
+                checked_operands.map(
+                    &fn(
+                        anon x: &(Expression, Context<SensitivityId, f64>)
+                    ) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) => (x.0.type, x.1)
+                ),
+                &fn[
+                    &mut type_map
+                    &mut type_context
+                    &mut epsilon_context
+                    &mut sensitivity_context
+                    op
+                ](
+                    anon acc: (SensitivityMapped<TypeId>, Context<SensitivityId, f64>)
+                    anon x: &(SensitivityMapped<TypeId>, Context<SensitivityId, f64>)
+                ) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) {
+                    let acc_type = type_map[acc.0.value]
+                    let x_type = type_map[x.0.value]
+                    // FIXME: Implement type unification + sensitivity merging
+                    let local_sensitivity = match x.0.sensitivity.has_value() {
+                        true => x.1.lookup(x.0.sensitivity!)
+                        false => 0f64
+                    }
+                    let sensitivity = sens_merge(
+                        acc.0.sensitivity
+                        x.0.sensitivity
+                        op
+                        local_sensitivity
+                        &mut sensitivity_context
+                        &mut type_map
+                        acc_type
+                        x_type
+                    )
+                    let sens = SensitivityMapped(
+                        value: make_type(type_map, merge_bounds(type_map, epsilon_context, acc_type, x_type, op))
+                        sensitivity
+                    )
+                    return (sens, acc.1)
+                }
+            ).0
+
+            let operands = checked_operands.map(&fn(anon x: &(Expression, Context<SensitivityId, f64>)) throws => x.0)
+
+            yield Expression::Operation(type, op, operands)
+        }
+        Call(procedure, arguments) => {
+            mut checked_arguments: [(Expression, Context<SensitivityId, f64>)] = []
+            for argument in arguments {
+                mut new_sensitivity_context = child_context(*sensitivity_context)
+                let result = typecheck(
+                    lattice
+                    type_map
+                    type_context
+                    type_level_sensitivity_context
+                    epsilon_context
+                    sensitivity_context: &mut new_sensitivity_context
+                    argument
                 )
-                let sens = SensitivityMapped(
-                    value: make_type(type_map, merge_bounds(type_map, epsilon_context, acc_type, x_type, op))
-                    sensitivity
-                )
-                return (sens, acc.1)
+                checked_arguments.push((result, new_sensitivity_context))
             }
-        ).0
 
-        let operands = checked_operands.map(&fn(anon x: &(Expression, Context<SensitivityId, f64>)) throws => x.0)
+            mut new_type_context = child_context(*type_context)
+            for (name, type) in procedure.parameters {
+                new_type_context.insert(name, type.value)
+            }
+            let checked_procedure = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, procedure)
+            let return_type = type_map[checked_procedure.return_type]
+            let return_sens = type_level_sensitivity_context.find(checked_procedure.return_type)
+            let type = make_type(type_map, return_type)
+            if return_sens is Some(value) {
+                type_level_sensitivity_context.insert(type, value)
+            }
 
-        yield Expression::Operation(type, op, operands)
-    }
-    else => {
-        eprintln("Typecheck not implemented for {}", expr)
-        abort()
+            mut operands: [Expression] = []
+            for (argument, _) in checked_arguments {
+                operands.push(argument)
+            }
+
+            yield Expression::Call(procedure: checked_procedure, arguments: operands).with_type(
+                type
+                sensitivity: return_sens
+            )
+        }
+        ForEach(var, index, accum, accum_init, list, body) => {
+            let list_expr = typecheck(
+                lattice
+                type_map
+                type_context
+                type_level_sensitivity_context
+                epsilon_context
+                sensitivity_context
+                list
+            )
+            let list_type = type_map.get(list_expr.type.value)!
+            let list_sens = type_level_sensitivity_context.find(list_expr.type.value)
+            let accum_init_expr = typecheck(
+                lattice
+                type_map
+                type_context
+                type_level_sensitivity_context
+                epsilon_context
+                sensitivity_context
+                accum_init
+            )
+            let accum_var_type = accum_init_expr.type.value
+            let entry_var_type = list_type.element_type(&mut type_map)
+            mut new_type_context = child_context(*type_context)
+            new_type_context.insert(var, entry_var_type)
+            let entry_var_sens = SensitivityId(id: sensitivity_context.map.size() as! u64)
+            sensitivity_context.insert(entry_var_sens, 1f64)
+            type_level_sensitivity_context.insert(entry_var_type, entry_var_sens)
+            let index_var_type = make_type(
+                &mut type_map
+                Type::Int(InferredRange::Bounded(from: 0i64, to: list_type.element_count(&type_map) as! i64 - 1i64))
+            )
+            new_type_context.insert(index, index_var_type)
+            let index_var_sens = SensitivityId(id: sensitivity_context.map.size() as! u64)
+            sensitivity_context.insert(index_var_sens, 1f64)
+            type_level_sensitivity_context.insert(index_var_type, index_var_sens)
+            new_type_context.insert(accum, accum_var_type)
+            let accum_var_sens = SensitivityId(id: sensitivity_context.map.size() as! u64)
+            sensitivity_context.insert(accum_var_sens, 1f64)
+            type_level_sensitivity_context.insert(accum_var_type, accum_var_sens)
+
+            if sens_merge(
+                    list_sens
+                    entry_var_sens
+                    op: Operation::Add
+                    local_sensitivity: 0f64
+                    sensitivity_context
+                    type_map
+                    list_type
+                    type_map.get(entry_var_type)!
+                ) is Some(new_sens) {
+                type_level_sensitivity_context.insert(entry_var_type, new_sens)
+                sensitivity_context.insert(new_sens, 1f64)
+            }
+
+            let body_stmt = typecheck(
+                lattice
+                type_map
+                type_context: &mut new_type_context
+                type_level_sensitivity_context
+                epsilon_context
+                sensitivity_context
+                body
+            )
+            let body_sens = body_stmt.type.sensitivity
+            mut loop_sensitivity = body_stmt.type.sensitivity
+            mut loop_sensitivity_multiplier = 1f64
+
+            if sens_merge(
+                list_sens
+                body_sens
+                op: Operation::Add
+                local_sensitivity: 0f64
+                sensitivity_context
+                type_map
+                type_map.get(list_expr.type.value)!
+                type_map.get(body_stmt.type.value)!
+            ) is Some(new_sens) {
+                type_level_sensitivity_context.insert(body_stmt.type.value, new_sens)
+                let total_sensitivity_multiplier = list_type.element_count(&type_map)
+                loop_sensitivity = new_sens
+                loop_sensitivity_multiplier = total_sensitivity_multiplier as! f64
+            }
+
+            yield Expression::ForEach(var, index, accum, accum_init: accum_init_expr, list: list_expr, body: body_stmt).with_type(
+                type: body_stmt.type.value
+                sensitivity: loop_sensitivity
+                sensitivity_multiplier: loop_sensitivity_multiplier
+            )
+        }
     }
 }
 
@@ -879,86 +1073,92 @@ fn typecheck(
         let checked = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
         yield Statement::Expression(type: checked.type, checked)
     }
-    ForEach(var, index, list, body) => {
-        let list_expr = typecheck(
-            lattice
-            type_map
-            type_context
-            type_level_sensitivity_context
-            epsilon_context
-            sensitivity_context
-            list
-        )
-        let list_type = type_map.get(list_expr.type.value)!
-        let list_sens = type_level_sensitivity_context.find(list_expr.type.value)
-        let entry_var_type = list_type.element_type(&mut type_map)
-        mut new_type_context = child_context(*type_context)
-        new_type_context.insert(var, entry_var_type)
-        let entry_var_sens = SensitivityId(id: sensitivity_context.map.size() as! u64)
-        sensitivity_context.insert(entry_var_sens, 1f64)
-        type_level_sensitivity_context.insert(entry_var_type, entry_var_sens)
-        let index_var_type = make_type(
-            &mut type_map
-            Type::Int(InferredRange::Bounded(from: 0i64, to: list_type.element_count(&type_map) as! i64 - 1i64))
-        )
-        new_type_context.insert(index, index_var_type)
-        let index_var_sens = SensitivityId(id: sensitivity_context.map.size() as! u64)
-        sensitivity_context.insert(index_var_sens, 1f64)
-        type_level_sensitivity_context.insert(index_var_type, index_var_sens)
+    Sequence(first, second) => {
+        let checked_first = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, first)
+        let checked_second = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, second)
+        yield Statement::Sequence(type: checked_second.type, first: checked_first, second: checked_second)
+    }
+    Ignore => stmt
+    Assign(var, value) => {
+        let checked_value = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, value)
+        let maybe_var_type = type_context.find(var)
+        yield match maybe_var_type.has_value() {
+            true => {
+                let var_type = maybe_var_type!
+                let value_type = type_map.get(checked_value.type.value)!
+                let new_type = merge_bounds(type_map, epsilon_context, type_map[var_type], value_type, op: Operation::Add)
+                let new_sens = sens_merge(
+                    type_level_sensitivity_context.find(var_type)
+                    checked_value.type.sensitivity
+                    op: Operation::Add
+                    local_sensitivity: 0f64
+                    sensitivity_context
+                    type_map
+                    type_map[var_type]
+                    value_type
+                )
+                let new_sens_multiplier = match new_sens.has_value() {
+                    true => sensitivity_context.lookup(new_sens!)
+                    false => 1f64
+                }
+                yield Statement::Assign(var, value: checked_value).with_type(
+                    type: make_type(type_map, new_type)
+                    sensitivity: new_sens
+                    sensitivity_multiplier: new_sens_multiplier
+                )
+            }
+            false => {
+                let new_type = make_type(type_map, type_map[checked_value.type.value])
+                type_context.insert(var, new_type)
 
-        if sens_merge(
-                list_sens
-                entry_var_sens
-                op: Operation::Add
-                local_sensitivity: 0f64
-                sensitivity_context
-                type_map
-                list_type
-                type_map.get(entry_var_type)!
-            ) is Some(new_sens) {
-            type_level_sensitivity_context.insert(entry_var_type, new_sens)
-            sensitivity_context.insert(new_sens, 1f64)
+                yield Statement::Assign(var, value: checked_value).with_type(
+                    type: new_type
+                    sensitivity: checked_value.type.sensitivity
+                    sensitivity_multiplier: checked_value.type.sensitivity_multiplier
+                )
+            }
         }
-
-        let body_stmt = typecheck(
-            lattice
-            type_map
-            type_context: &mut new_type_context
-            type_level_sensitivity_context
-            epsilon_context
-            sensitivity_context
-            body
-        )
-        let body_sens = body_stmt.type.sensitivity
-        mut loop_sensitivity = body_stmt.type.sensitivity
-        mut loop_sensitivity_multiplier = 1f64
-
-        if sens_merge(
-            list_sens
-            body_sens
-            op: Operation::Add
-            local_sensitivity: 0f64
-            sensitivity_context
-            type_map
-            type_map.get(list_expr.type.value)!
-            type_map.get(body_stmt.type.value)!
-        ) is Some(new_sens) {
-            type_level_sensitivity_context.insert(body_stmt.type.value, new_sens)
-            let total_sensitivity_multiplier = list_type.element_count(&type_map)
-            loop_sensitivity = new_sens
-            loop_sensitivity_multiplier = total_sensitivity_multiplier as! f64
-        }
-
-        yield Statement::ForEach(var, index, list: list_expr, body: body_stmt).with_type(
-            type: body_stmt.type.value
-            sensitivity: loop_sensitivity
-            sensitivity_multiplier: loop_sensitivity_multiplier
-        )
+    }
+    Return(expr) => {
+        let checked_expr = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+        yield Statement::Return(checked_expr).with_type(checked_expr.type.value)
     }
     else => {
-        eprintln("Typecheck not implemented for ", stmt)
+        eprintln("Typecheck not implemented for {}", stmt)
         abort()
     }
+}
+
+fn typecheck(
+    lattice: &LabelLattice
+    type_map: &mut [TypeId:Type]
+    type_context: &mut Context<String, TypeId>
+    type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
+    sensitivity_context: &mut Context<SensitivityId, f64>
+    anon mut proc: Procedure
+) throws -> Procedure {
+    mut new_type_context = child_context(*type_context)
+    for (name, type) in proc.parameters {
+        new_type_context.insert(name, type.value)
+    }
+    let checked_body = typecheck(
+        lattice
+        type_map
+        type_context: &mut new_type_context
+        type_level_sensitivity_context
+        epsilon_context
+        sensitivity_context
+        proc.body
+    )
+    let return_type = type_map.get(checked_body.type.value)!
+    let return_sens = type_level_sensitivity_context.find(checked_body.type.value)
+    proc.body = checked_body
+    proc.return_type = make_type(type_map, return_type)
+    if return_sens is Some(value) {
+        type_level_sensitivity_context.insert(proc.return_type, value)
+    }
+    return proc
 }
 
 fn main() {
@@ -983,14 +1183,141 @@ fn main() {
         &map_direct
     )
 
-    epsilon_context.insert(EpsilonId(id: 0), Epsilon::Fixed(1f64))
-    epsilon_context.insert(EpsilonId(id: 1), Epsilon::Fixed(1f64))
+    // epsilon_context.insert(EpsilonId(id: 0), Epsilon::Fixed(1f64))
+    // epsilon_context.insert(EpsilonId(id: 1), Epsilon::Fixed(1f64))
 
     // let variable_type = make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0i64, to: 10000i64)))
     // type_context.insert("x", variable_type)
-    let variable_sens = SensitivityId(id: 0)
-    sensitivity_context.insert(variable_sens, 1f64)
-    // type_level_sensitivity_context.insert(variable_type, variable_sens)
+    // let variable_sens = SensitivityId(id: 0)
+    // sensitivity_context.insert(variable_sens, 1f64)
+    // // type_level_sensitivity_context.insert(variable_type, variable_sens)
+
+    // let pair_left = make_type(&mut type_map
+    //     Type::TypeWithSec(
+    //         type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64)))
+    //         label: Label(name: "L3")
+    //         epsilon: EpsilonId(id: 0)
+    // ))
+    // let pair_right = make_type(&mut type_map
+    //     Type::TypeWithSec(
+    //         type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64)))
+    //         label: Label(name: "L2")
+    //         epsilon: EpsilonId(id: 1)
+    // ))
+    // let pairs = make_type(&mut type_map, Type::Pair(left: pair_left, right: pair_right))
+
+    // let list_sens = SensitivityId(id: 1)
+    // sensitivity_context.insert(list_sens, 1f64)
+    // let list_type = make_type(
+    //     &mut type_map
+    //     Type::List(type: pairs, size: 100)
+    // )
+    // type_context.insert("list", list_type)
+    // type_level_sensitivity_context.insert(list_type, list_sens)
+
+    // mut e1 = Expression::Variable(name: "i")
+    // mut e2 = Expression::Variable(name: "x")
+    // mut e3 = Expression::Variable(name: "x")
+    // mut expr = Expression::Operation(
+    //     op: Operation::Mul
+    //     operands: [
+    //         e1,
+    //         Expression::Declassify(
+    //             expr: Expression::Subscript(
+    //                 expr: e2
+    //                 index: Expression::IntLiteral(value: 0)
+    //             )
+    //             source_epsilon: EpsilonId(id: 0)
+    //             target_label: Label(name: "L2")
+    //             target_epsilon: EpsilonId(id: 1)
+    //         )
+    //     ]
+    // )
+
+    // expr = Expression::Operation(
+    //     op: Operation::Add
+    //     operands: [
+    //         expr,
+    //         Expression::Subscript(
+    //             expr: e2
+    //             index: Expression::IntLiteral(value: 1)
+    //         )
+    //     ]
+    // )
+
+    // let list = Expression::Variable(name: "list")
+
+    // let statement = Statement::ForEach(
+    //     var: "x"
+    //     index: "i"
+    //     list
+    //     body: Statement::Expression(expr)
+    // )
+
+    let proc = make_test_program(
+        &lattice
+        &mut type_map
+        &mut type_context
+        &mut type_level_sensitivity_context
+        &mut epsilon_context
+        &mut sensitivity_context
+    )
+
+    let checked = typecheck(
+        &lattice
+        &mut type_map
+        &mut type_context
+        &mut type_level_sensitivity_context
+        &mut epsilon_context
+        &mut sensitivity_context
+        proc
+    )
+
+    eprintln("{}", lattice.render())
+
+    eprintln("Sensitivity context:")
+    sensitivity_context.dump()
+    eprintln("Epsilon context:")
+    epsilon_context.dump()
+
+    println("{}", checked.to_tree(&type_map))
+}
+
+/// Program:
+/// ```
+/// proc zip (
+///   xs : list T n lab { L1 } eps { e1 },
+///   ys : list U n lab { L2 } eps { e2 },
+/// ) -> list (T lab { L1 } eps { e1 } × U lab { L2 } eps { e2 }) n {...}
+///
+/// proc wavg (
+///   xs : list int n lab { L1 } eps { e1 },
+///   ys : list int n lab { L2 } eps { e2 },
+/// ) -> int lab { L2 } eps {0} {
+///   x = foreach v index i accum x = 0 in zip(xs, ys) {
+///     x + declassify (
+///       // spend e1 /n declassifying xs[i]
+///       v[0] , e1 / n,
+///       // to level L2 with target budget e2 /n
+///       L2 , e2 / n,
+///     ) * v[1]
+///   };
+///   res = x / n;
+///   // Spend e2/n and add noise to result
+///   return noise(res, 0)
+/// }
+/// ```
+
+fn make_test_program(
+    lattice: &LabelLattice
+    type_map: &mut [TypeId:Type]
+    type_context: &mut Context<String, TypeId>
+    type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
+    sensitivity_context: &mut Context<SensitivityId, f64>
+) throws -> Procedure {
+    let list_sens = SensitivityId(id: 1)
+    sensitivity_context.insert(list_sens, 1f64)
 
     let pair_left = make_type(&mut type_map
         Type::TypeWithSec(
@@ -1006,70 +1333,96 @@ fn main() {
     ))
     let pairs = make_type(&mut type_map, Type::Pair(left: pair_left, right: pair_right))
 
-    let list_sens = SensitivityId(id: 1)
-    sensitivity_context.insert(list_sens, 1f64)
-    let list_type = make_type(
-        &mut type_map
-        Type::List(type: pairs, size: 100)
-    )
-    type_context.insert("list", list_type)
-    type_level_sensitivity_context.insert(list_type, list_sens)
+    epsilon_context.insert(EpsilonId(id: 0), Epsilon::Fixed(1f64))
+    epsilon_context.insert(EpsilonId(id: 1), Epsilon::Fixed(1f64))
 
-    mut e1 = Expression::Variable(name: "i")
-    mut e2 = Expression::Variable(name: "x")
-    mut e3 = Expression::Variable(name: "x")
-    mut expr = Expression::Operation(
-        op: Operation::Mul
-        operands: [
-            e1,
-            Expression::Declassify(
-                expr: Expression::Subscript(
-                    expr: e2
-                    index: Expression::IntLiteral(value: 0)
-                )
-                source_epsilon: EpsilonId(id: 0)
-                target_label: Label(name: "L2")
-                target_epsilon: EpsilonId(id: 1)
-            )
+    let xs_type = make_type(&mut type_map, Type::List(type: pair_left, size: 100))
+    let ys_type = make_type(&mut type_map, Type::List(type: pair_right, size: 100))
+    let pair_ret = make_type(&mut type_map, Type::List(type: pairs, size: 100))
+
+    let xs_sens = SensitivityId(id: 2)
+    sensitivity_context.insert(xs_sens, 1f64)
+    let ys_sens = SensitivityId(id: 3)
+    sensitivity_context.insert(ys_sens, 1f64)
+
+    let zip = Procedure(
+        name: "zip"
+        parameters: [
+            "xs": SensitivityMapped(value: xs_type, sensitivity: Some(list_sens))
+            "ys": SensitivityMapped(value: ys_type, sensitivity: Some(list_sens))
         ]
+        return_type: pair_ret
+        body: Statement::Ignore.with_type(type: pair_ret, sensitivity: list_sens)
     )
 
-    expr = Expression::Operation(
-        op: Operation::Add
-        operands: [
-            expr,
-            Expression::Subscript(
-                expr: e2
-                index: Expression::IntLiteral(value: 1)
-            )
-        ]
-    )
-
-    let list = Expression::Variable(name: "list")
-
-    let statement = Statement::ForEach(
+    let first = Statement::Assign(
         var: "x"
-        index: "i"
-        list
-        body: Statement::Expression(expr)
+        value: Expression::ForEach(
+            var: "v"
+            index: "i"
+            accum: "x"
+            accum_init: Expression::IntLiteral(value: 0)
+            list: Expression::Call(
+                procedure: zip
+                arguments: [
+                    Expression::Variable(name: "xs")
+                    Expression::Variable(name: "ys")
+                ]
+            )
+            body: Statement::Expression(
+                Expression::Operation(
+                    op: Operation::Add
+                    operands: [
+                        Expression::Variable(name: "x")
+                        Expression::Declassify(
+                            expr: Expression::Subscript(
+                                expr: Expression::Variable(name: "v")
+                                index: Expression::IntLiteral(value: 0)
+                            )
+                            source_epsilon: EpsilonId(id: 0)
+                            target_label: Label(name: "L2")
+                            target_epsilon: EpsilonId(id: 1)
+                        )
+                    ]
+                )
+            )
+        )
+    )
+    
+    let noise_epsilon = EpsilonId(id: 2)
+    epsilon_context.insert(noise_epsilon, Epsilon::Fixed(0f64))
+
+    let second = Statement::Sequence(
+        first: Statement::Assign(
+            var: "res"
+            value: Expression::Operation(
+                op: Operation::Div
+                operands: [
+                    Expression::Variable(name: "x")
+                    Expression::IntLiteral(value: 100)
+                ]
+            )
+        )
+        second: Statement::Return(
+            Expression::Noise(
+                expr: Expression::Variable(name: "res")
+                epsilon: noise_epsilon
+            )
+        )
     )
 
-    let checked = typecheck(
-        &lattice
-        &mut type_map
-        &mut type_context
-        &mut type_level_sensitivity_context
-        &mut epsilon_context
-        &mut sensitivity_context
-        statement
+    let wavg = Procedure(
+        name: "wavg"
+        parameters: [
+            "xs": SensitivityMapped(value: xs_type, sensitivity: Some(xs_sens))
+            "ys": SensitivityMapped(value: ys_type, sensitivity: Some(ys_sens))
+        ]
+        return_type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64)))
+        body: Statement::Sequence(
+            first
+            second
+        )
     )
 
-    eprintln("{}", lattice.render())
-
-    eprintln("Sensitivity context:")
-    sensitivity_context.dump()
-    eprintln("Epsilon context:")
-    epsilon_context.dump()
-
-    println("{}", checked.to_tree(&type_map))
+    return wavg
 }
