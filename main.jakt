@@ -208,6 +208,17 @@ class LabelLattice {
         }
         return builder.to_string()
     }
+
+    public fn all_labels(this) -> {Label} {
+        mut result: {Label} = {}
+        for top in this.tops {
+            result.add(top)
+            for label in .ancestors(top) {
+                result.add(label)
+            }
+        }
+        return result
+    }
 }
 
 type SensitivityId implements(Hashable, Equal<SensitivityId>) {
@@ -268,6 +279,11 @@ boxed enum Type {
     Pair(left: TypeId, right: TypeId)
     TypeWithSec(type: TypeId, label: Label, epsilon: EpsilonId)
 
+    fn pure_type(this, type_map: &[TypeId:Type]) -> Type => match this {
+        TypeWithSec(type) => type_map[type].pure_type(type_map)
+        else => this
+    }
+
     fn element_type(this, type_map: &mut [TypeId:Type]) -> TypeId => match this {
         List(type) => type
         TypeWithSec(type, label, epsilon) => make_type(type_map, Type::TypeWithSec(type, label, epsilon))
@@ -322,6 +338,7 @@ boxed enum Expression {
     type: SensitivityMapped<TypeId> = SensitivityMapped(value: unchecked(), sensitivity: None)
 
     IntLiteral(value: i64)
+    ListLiteral(elements: [Expression])
     Variable(name: String)
     Noise(expr: Expression, epsilon: EpsilonId)
     Declassify(expr: Expression, source_epsilon: EpsilonId, target_label: Label, target_epsilon: EpsilonId, used_epsilon: EpsilonId? = None)
@@ -342,6 +359,7 @@ boxed enum Expression {
 
         return match this {
             IntLiteral(value) => Expression::IntLiteral(type: sens, value)
+            ListLiteral(elements) => Expression::ListLiteral(type: sens, elements)
             Variable(name) => Expression::Variable(type: sens, name)
             Noise(expr, epsilon) => Expression::Noise(type: sens, expr, epsilon)
             Declassify(expr, source_epsilon, target_label, target_epsilon, used_epsilon) => Expression::Declassify(type: sens, expr, source_epsilon, target_label, target_epsilon, used_epsilon)
@@ -367,6 +385,7 @@ boxed enum Expression {
 
         return match this {
             IntLiteral(value) => Expression::IntLiteral(type: sens, value)
+            ListLiteral(elements) => Expression::ListLiteral(type: sens, elements)
             Variable(name) => Expression::Variable(type: sens, name)
             Noise(expr, epsilon) => Expression::Noise(type: sens, expr, epsilon)
             Declassify(expr, source_epsilon, target_label, target_epsilon) => Expression::Declassify(type: sens, expr, source_epsilon, target_label, target_epsilon)
@@ -389,6 +408,22 @@ boxed enum Expression {
             .type.sensitivity?.id
             .type.sensitivity_multiplier
         )
+        ListLiteral(
+            elements
+        ) => {
+            mut x = format(
+                "{: >{}}list type={} sens=s{}*{}"
+                ""
+                indent
+                type_map[.type.value].render(type_map)
+                .type.sensitivity?.id
+                .type.sensitivity_multiplier
+            )
+            for element in elements {
+                x += "\n" + element.to_tree(type_map, indent: indent + 2)
+            }
+            yield x
+        }
         Variable(
             name: x
         ) => format(
@@ -487,7 +522,7 @@ boxed enum Statement {
     Expression(Expression)
     Return(Expression)
     IfThenElse(condition: Expression, consequence: Statement, alternative: Statement)
-    Assign(var: String, value: Expression)
+    Assign(var: String, value: Expression, declaration: bool = false)
     Sequence(first: Statement, second: Statement)
     Ignore
 
@@ -505,7 +540,7 @@ boxed enum Statement {
             Expression(expr) => Statement::Expression(type: sens, expr)
             Return(expr) => Statement::Return(type: sens, expr)
             IfThenElse(condition, consequence, alternative) => Statement::IfThenElse(type: sens, condition, consequence, alternative)
-            Assign(var, value) => Statement::Assign(type: sens, var, value)
+            Assign(var, value, declaration) => Statement::Assign(type: sens, var, value, declaration)
             Sequence(first, second) => Statement::Sequence(type: sens, first, second)
             Ignore => Statement::Ignore(type: sens)
         }
@@ -531,11 +566,12 @@ boxed enum Statement {
                 .type.sensitivity?.id
                 .type.sensitivity_multiplier
             ) + consequence.to_tree(type_map, indent: indent + 2) + "\nelse\n" + alternative.to_tree(type_map, indent: indent + 2)
-        Assign(var, value) =>
+        Assign(var, value, declaration) =>
             format(
-                "{: >{}}Assign {}\n{}"
+                "{: >{}}{} {}\n{}"
                 ""
                 indent
+                (match declaration { true => "Declare", false => "Assign" })
                 var
                 value.to_tree(type_map, indent: indent + 2)
             )
@@ -566,7 +602,7 @@ struct Procedure {
     }
 }
 
-class Context<K requires(Hashable), V> {
+class Context<K requires(Hashable), V> implements(IntoIterator<(K, V)>) {
     public map: [K:V]
     public base: Context<K, V>? = None
 
@@ -585,13 +621,56 @@ class Context<K requires(Hashable), V> {
         return None
     }
 
-    public fn insert(mut this, anon key: K, anon value: V) throws { .map.set(key, value) }
+    public fn insert(mut this, anon key: K, anon value: V) throws {
+        if .base is Some(context) and context.find(key).has_value() {
+            .base!.insert(key, value)
+            return
+        }
+
+        .map.set(key, value)
+    }
 
     public fn dump(this) {
         for (key, value) in .map {
             eprintln("  {}: {}", key, value)
         }
         if .base is Some(base) { base.dump() }
+    }
+
+    public fn mutable_snapshot(this) -> Context<K, V> {
+        mut map: [K:V] = [:]
+        mut base = .base
+        while base is Some(b) {
+            for (key, value) in b.map {
+                if not map.contains(key) {
+                    map.set(key, value)
+                }
+            }
+            base = b.base
+        }
+        for (key, value) in .map {
+            map.set(key, value)
+        }
+        return Context(map)
+    }
+
+    public fn unify(mut this, anon other: Context<K, V>, anon merge: &fn(anon a: V, anon b: V) -> V) throws {
+        if other.base is Some(base) {
+            .unify(base, merge)
+        }
+
+        for (key, value) in other.map {
+            if .find(key) is Some(existing) {
+                .insert(key, merge(existing, value))
+            } else {
+                .insert(key, value)
+            }
+        }
+    }
+
+    public fn iterator(this) -> DictionaryIterator<K, V> {
+        let context = .mutable_snapshot()
+        return context.map.iterator()
     }
 }
 
@@ -733,7 +812,7 @@ fn sens_merge(
     anon rhs: Type
 ) -> SensitivityId? {
     if sens1 is None { return sens2 }
-    if sens2 is None { return None }
+    if sens2 is None { return sens1 }
 
     let s1 = sens1!
     let s2 = sens2!
@@ -766,6 +845,26 @@ fn typecheck(
 ) throws -> Expression {
     return match expr {
         IntLiteral(value) => expr.with_type(make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: value, to: value))))
+        ListLiteral(elements) => {
+            mut element_type: TypeId? = None
+            mut checked_elements: [Expression] = []
+            for element in elements {
+                let checked_element = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, element)
+                checked_elements.push(checked_element)
+                if element_type is None {
+                    element_type = checked_element.type.value
+                } else {
+                    element_type = make_type(&mut type_map, merge_bounds(type_map, epsilon_context, type_map[element_type!], type_map[checked_element.type.value], op: Operation::Add))
+                }
+            }
+            if element_type is None {
+                eprintln("Could not determine element type for list, defaulting to unchecked")
+                element_type = make_type(&mut type_map, Type::Unchecked)
+            }
+
+            let type = make_type(type_map, Type::List(type: element_type!, size: elements.size()))
+            yield Expression::ListLiteral(elements: checked_elements).with_type(type)
+        }
         Variable(name) => {
             let type = type_context.lookup(name)
             yield expr.with_type(
@@ -865,7 +964,11 @@ fn typecheck(
             let new_epsilon = EpsilonId(id: epsilon_context.map.size() as! u64)
             epsilon_context.insert(new_epsilon, Epsilon::Subtract(a: epsilon, b: epsilon2))
             let new_type = make_type(type_map, Type::TypeWithSec(type: checked_expr.type.value, label: expr_type.label(lattice), epsilon: new_epsilon))
-            yield Expression::Noise(expr: checked_expr, epsilon).with_type(new_type)
+            yield Expression::Noise(expr: checked_expr, epsilon).with_type(
+                new_type
+                sensitivity: checked_expr.type.sensitivity
+                sensitivity_multiplier: checked_expr.type.sensitivity_multiplier
+            )
         }
         Operation(op, operands) => {
             let checked_operands = operands.map(
@@ -986,13 +1089,15 @@ fn typecheck(
                 sensitivity_context
                 accum_init
             )
+            mut new_type_sensitivity_context = child_context(*type_level_sensitivity_context)
+
             let accum_var_type = accum_init_expr.type.value
             let entry_var_type = list_type.element_type(&mut type_map)
             mut new_type_context = child_context(*type_context)
             new_type_context.insert(var, entry_var_type)
             let entry_var_sens = SensitivityId(id: sensitivity_context.map.size() as! u64)
             sensitivity_context.insert(entry_var_sens, 1f64)
-            type_level_sensitivity_context.insert(entry_var_type, entry_var_sens)
+            new_type_sensitivity_context.map.set(entry_var_type, entry_var_sens)
             let index_var_type = make_type(
                 &mut type_map
                 Type::Int(InferredRange::Bounded(from: 0i64, to: list_type.element_count(&type_map) as! i64 - 1i64))
@@ -1000,11 +1105,11 @@ fn typecheck(
             new_type_context.insert(index, index_var_type)
             let index_var_sens = SensitivityId(id: sensitivity_context.map.size() as! u64)
             sensitivity_context.insert(index_var_sens, 1f64)
-            type_level_sensitivity_context.insert(index_var_type, index_var_sens)
+            new_type_sensitivity_context.map.set(index_var_type, index_var_sens)
             new_type_context.insert(accum, accum_var_type)
             let accum_var_sens = SensitivityId(id: sensitivity_context.map.size() as! u64)
             sensitivity_context.insert(accum_var_sens, 1f64)
-            type_level_sensitivity_context.insert(accum_var_type, accum_var_sens)
+            new_type_sensitivity_context.map.set(accum_var_type, accum_var_sens)
 
             if sens_merge(
                     list_sens
@@ -1016,7 +1121,7 @@ fn typecheck(
                     list_type
                     type_map.get(entry_var_type)!
                 ) is Some(new_sens) {
-                type_level_sensitivity_context.insert(entry_var_type, new_sens)
+                new_type_sensitivity_context.insert(entry_var_type, new_sens)
                 sensitivity_context.insert(new_sens, 1f64)
             }
 
@@ -1024,14 +1129,14 @@ fn typecheck(
                 lattice
                 type_map
                 type_context: &mut new_type_context
-                type_level_sensitivity_context
+                type_level_sensitivity_context: &mut new_type_sensitivity_context
                 epsilon_context
                 sensitivity_context
                 body
             )
             let body_sens = body_stmt.type.sensitivity
             mut loop_sensitivity = body_stmt.type.sensitivity
-            mut loop_sensitivity_multiplier = 1f64
+            mut loop_sensitivity_multiplier = list_type.element_count(&type_map) as! f64
 
             if sens_merge(
                 list_sens
@@ -1082,6 +1187,7 @@ fn typecheck(
     Assign(var, value) => {
         let checked_value = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, value)
         let maybe_var_type = type_context.find(var)
+        eprintln("Assigning to {} with type {} (exists? {})", var, checked_value.type.value, maybe_var_type.has_value())
         yield match maybe_var_type.has_value() {
             true => {
                 let var_type = maybe_var_type!
@@ -1097,12 +1203,17 @@ fn typecheck(
                     type_map[var_type]
                     value_type
                 )
+                let type = make_type(type_map, new_type)
                 let new_sens_multiplier = match new_sens.has_value() {
-                    true => sensitivity_context.lookup(new_sens!)
+                    true => {
+                        type_level_sensitivity_context.insert(type, new_sens!)
+                        eprintln(" -- Assigning to {} with sens {}", var, new_sens!)
+                        yield sensitivity_context.lookup(new_sens!)
+                    }
                     false => 1f64
                 }
-                yield Statement::Assign(var, value: checked_value).with_type(
-                    type: make_type(type_map, new_type)
+                yield Statement::Assign(var, value: checked_value, declaration: false).with_type(
+                    type
                     sensitivity: new_sens
                     sensitivity_multiplier: new_sens_multiplier
                 )
@@ -1111,7 +1222,7 @@ fn typecheck(
                 let new_type = make_type(type_map, type_map[checked_value.type.value])
                 type_context.insert(var, new_type)
 
-                yield Statement::Assign(var, value: checked_value).with_type(
+                yield Statement::Assign(var, value: checked_value, declaration: true).with_type(
                     type: new_type
                     sensitivity: checked_value.type.sensitivity
                     sensitivity_multiplier: checked_value.type.sensitivity_multiplier
@@ -1121,7 +1232,11 @@ fn typecheck(
     }
     Return(expr) => {
         let checked_expr = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
-        yield Statement::Return(checked_expr).with_type(checked_expr.type.value)
+        yield Statement::Return(checked_expr).with_type(
+            checked_expr.type.value
+            sensitivity: checked_expr.type.sensitivity
+            sensitivity_multiplier: checked_expr.type.sensitivity_multiplier
+        )
     }
     else => {
         eprintln("Typecheck not implemented for {}", stmt)
@@ -1139,9 +1254,33 @@ fn typecheck(
     anon mut proc: Procedure
 ) throws -> Procedure {
     mut new_type_context = child_context(*type_context)
+    mut new_sensitivity_contexts: [Context<SensitivityId, f64>] = []
     for (name, type) in proc.parameters {
         new_type_context.insert(name, type.value)
+        new_sensitivity_contexts.push(sensitivity_context.mutable_snapshot())
     }
+    mut i = 0uz
+    for (name, type) in proc.parameters {
+        mut new_type_level_sensitivity_context = child_context(*type_level_sensitivity_context)
+        mut new_epsilon_context = epsilon_context.mutable_snapshot()
+        mut new_type_context_snapshot = new_type_context.mutable_snapshot()
+
+        let checked_body = typecheck(
+            lattice
+            type_map
+            type_context: &mut new_type_context_snapshot
+            type_level_sensitivity_context: &mut new_type_level_sensitivity_context
+            epsilon_context: &mut new_epsilon_context
+            sensitivity_context: &mut new_sensitivity_contexts[i]
+            proc.body
+        )
+        i += 1
+    }
+
+    for context in new_sensitivity_contexts {
+        sensitivity_context.unify(context, &fn(anon a: f64, anon b: f64) -> f64 => a + b)
+    }
+
     let checked_body = typecheck(
         lattice
         type_map
@@ -1151,6 +1290,7 @@ fn typecheck(
         sensitivity_context
         proc.body
     )
+
     let return_type = type_map.get(checked_body.type.value)!
     let return_sens = type_level_sensitivity_context.find(checked_body.type.value)
     proc.body = checked_body
@@ -1254,7 +1394,7 @@ fn main() {
     //     body: Statement::Expression(expr)
     // )
 
-    let proc = make_test_program(
+    let procs = make_test_program(
         &lattice
         &mut type_map
         &mut type_context
@@ -1263,15 +1403,19 @@ fn main() {
         &mut sensitivity_context
     )
 
-    let checked = typecheck(
-        &lattice
-        &mut type_map
-        &mut type_context
-        &mut type_level_sensitivity_context
-        &mut epsilon_context
-        &mut sensitivity_context
-        proc
-    )
+    mut checked_procs: [Procedure] = []
+    for proc in procs {
+        let checked = typecheck(
+            &lattice
+            &mut type_map
+            &mut type_context
+            &mut type_level_sensitivity_context
+            &mut epsilon_context
+            &mut sensitivity_context
+            proc
+        )
+        checked_procs.push(checked)
+    }
 
     eprintln("{}", lattice.render())
 
@@ -1280,7 +1424,312 @@ fn main() {
     eprintln("Epsilon context:")
     epsilon_context.dump()
 
-    println("{}", checked.to_tree(&type_map))
+    for checked in checked_procs {
+        println("{}", checked.to_tree(&type_map))
+    }
+
+    codegen(
+        &lattice
+        &mut type_map
+        &mut type_context
+        &mut type_level_sensitivity_context
+        &mut epsilon_context
+        &mut sensitivity_context
+        checked_procs
+    )
+}
+
+fn codegen(
+    lattice: &LabelLattice
+    type_map: &mut [TypeId:Type]
+    type_context: &mut Context<String, TypeId>
+    type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
+    sensitivity_context: &mut Context<SensitivityId, f64>
+    anon proc: Procedure
+) throws {
+    codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, proc.return_type)
+    print(" {}(", proc.name)
+    mut first = true
+    for (name, type) in proc.parameters {
+        if not first {
+            print(", ")
+        }
+        codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, type.value)
+        print(" {}", name)
+        first = false
+    }
+    print(") {{\n")
+    codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, proc.body)
+    print("}}\n")
+}
+
+fn codegen(
+    lattice: &LabelLattice
+    type_map: &mut [TypeId:Type]
+    type_context: &mut Context<String, TypeId>
+    type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
+    sensitivity_context: &mut Context<SensitivityId, f64>
+    anon procs: [Procedure]
+) throws {
+
+    println("#include <array>")
+    println("#include <utility>")
+    println("#include <variant>")
+    println("#include <string>")
+    println("using namespace std;")
+    println()
+
+    // e*(...)
+    println("using Epsilon = variant<double, string>;")
+    println("Epsilon emul(Epsilon a, Epsilon b) {{ return a; }}")
+    println("Epsilon esub(Epsilon a, Epsilon b) {{ return a; }}")
+    println("Epsilon emax(Epsilon a, Epsilon b) {{ return a; }}")
+    println("Epsilon emin(Epsilon a, Epsilon b) {{ return a; }}")
+    println("Epsilon evar(string name);")
+    println()
+
+    // Dump Epsilons:
+    for (id, _) in epsilon_context {
+        println("extern Epsilon E{};", id.id)
+    }
+
+    for (id, epsilon) in epsilon_context {
+        print("Epsilon E{} = ", id.id)
+        match epsilon {
+            Fixed(value) => print("{:.1f}", value)
+            Multiply(a, b) => print("emul(E{}, E{})", a.id, b.id)
+            Subtract(a, b) => print("esub(E{}, E{})", a.id, b.id)
+            Max(a, b) => print("emax(E{}, E{})", a.id, b.id)
+            Min(a, b) => print("emin(E{}, E{})", a.id, b.id)
+            RuntimeVar(name) => print("evar(\"{}\")", name)
+        }
+        println(";")
+    }
+
+    // Labels:
+    println("enum Label {{")
+    for label in lattice.all_labels() {
+        println("    {},", label.name)
+    }
+    println("}};")
+
+    // declassify(...)
+    println("template<typename T>")
+    println("T declassify(T x, Epsilon source, Label target_label, Epsilon target) {{")
+    println("    return x;") // TODO
+    println("}}")
+
+    // noise(...)
+    println("template<typename T>")
+    println("T noise(T x, Epsilon epsilon) {{")
+    println("    return x;") // TODO
+    println("}}")
+
+    for proc in procs {
+        codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, proc)
+    }
+}
+
+fn codegen(
+    lattice: &LabelLattice
+    type_map: &mut [TypeId:Type]
+    type_context: &mut Context<String, TypeId>
+    type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
+    sensitivity_context: &mut Context<SensitivityId, f64>
+    anon stmt: Statement
+) throws {
+    match stmt {
+        Expression(expr) => {
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+            print(";\n")
+        }
+        Sequence(first, second) => {
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, first)
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, second)
+        }
+        Ignore => {}
+        Assign(var, value, declaration) => {
+            if declaration {
+                codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, type_map[value.type.value])
+                print(" ")
+            }
+            print("{} = ", var)
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, value)
+            print(";\n")
+        }
+        Return(expr) => {
+            print("return ")
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+            print(";\n")
+        }
+        IfThenElse => {}
+    }
+}
+
+fn codegen(
+    lattice: &LabelLattice
+    type_map: &mut [TypeId:Type]
+    type_context: &mut Context<String, TypeId>
+    type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
+    sensitivity_context: &mut Context<SensitivityId, f64>
+    anon expr: Expression
+) throws {
+    match expr {
+        IntLiteral(value) => print("{}", value)
+        ListLiteral(type, elements) => {
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, type.value)
+            print("{{")
+            mut first = true
+            for element in elements {
+                if not first {
+                    print(", ")
+                }
+                codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, element)
+                first = false
+            }
+            print("}}")
+        }
+        Variable(name) => print("{}", name)
+        Subscript(expr, index) => {
+            if type_map[expr.type.value].pure_type(&type_map) is Pair {
+                // get<index>(expr)
+                print("get<")
+                codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, index)
+                print(">(")
+                codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+                print(")")
+            } else {
+                // List or something
+                codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+                print("[")
+                codegen(
+                    lattice
+                    type_map
+                    type_context
+                    type_level_sensitivity_context
+                    epsilon_context
+                    sensitivity_context
+                    index
+                )
+                print("]")
+            }
+        }
+        Declassify(expr, source_epsilon, target_label, target_epsilon) => {
+            print("declassify(")
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+            print(", E{}, {}, E{})", source_epsilon.id, target_label.name, target_epsilon.id)
+        }
+        Noise(expr, epsilon) => {
+            print("noise(")
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
+            print(", E{})", epsilon.id)
+        }
+        Operation(op, operands) => {
+            let op_str = match op {
+                Add => "+"
+                Sub => "-"
+                Mul => "*"
+                Div => "/"
+                Pair => { abort() }
+            }
+            mut first = true
+            for operand in operands {
+                if not first {
+                    print(" {} ", op_str)
+                }
+                codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, operand)
+                first = false
+            }
+        }
+        Call(procedure, arguments) => {
+            print("{}(", procedure.name)
+            mut first = true
+            for argument in arguments {
+                if not first {
+                    print(", ")
+                }
+                codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, argument)
+                first = false
+            }
+            print(")")
+        }
+        ForEach(var, index, accum, accum_init, list, body) => {
+            print("({{\n")
+            // type accum = init;
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, accum_init.type.value)
+            print(" {} = ", accum)
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, accum_init)
+            print(";\n")
+
+            // for (type index = 0; index < list.size; index++) {
+            let list_type = type_map[list.type.value]
+            print("for (int ")
+            print("{} = 0; {} < {}; {}++) {{\n", index, index, list_type.element_count(&type_map), index)
+            // type var = list[index];
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, list_type.element_type(type_map))
+            print(" {} = (", var)
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, list)
+            print(")[{}];\n", index)
+
+            // accum = body;
+            print("{} = ", accum)
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, body)
+            print(";\n")
+            print("}}\n")
+
+            print("{}; }})", accum)
+        }
+    }
+}
+
+fn codegen(
+    lattice: &LabelLattice
+    type_map: &mut [TypeId:Type]
+    type_context: &mut Context<String, TypeId>
+    type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
+    sensitivity_context: &mut Context<SensitivityId, f64>
+    anon type: TypeId
+) throws {
+    codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, type_map[type])
+}
+
+fn codegen(
+    lattice: &LabelLattice
+    type_map: &mut [TypeId:Type]
+    type_context: &mut Context<String, TypeId>
+    type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
+    sensitivity_context: &mut Context<SensitivityId, f64>
+    anon type: Type
+) throws {
+    match type {
+        Int(range) => print("int")
+        List(type, size) => {
+            print("array<")
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, type)
+            print(", {}>", size)
+        }
+        Pair(left, right) => {
+            print("pair<")
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, left)
+            print(", ")
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, right)
+            print(">")
+        }
+        TypeWithSec(type, label, epsilon) => {
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, type)
+        }
+        Unchecked => {
+            eprintln("Unchecked type in codegen")
+            abort()
+        }
+        Bool => print("int")
+    }
 }
 
 /// Program:
@@ -1308,6 +1757,15 @@ fn main() {
 /// }
 /// ```
 
+fn new_sensitivity(
+    anon value: f64
+    anon sensitivity_context: &mut Context<SensitivityId, f64>
+) throws -> SensitivityId {
+    let id = SensitivityId(id: sensitivity_context.map.size() as! u64)
+    sensitivity_context.insert(id, value)
+    return id
+}
+
 fn make_test_program(
     lattice: &LabelLattice
     type_map: &mut [TypeId:Type]
@@ -1315,9 +1773,8 @@ fn make_test_program(
     type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
     epsilon_context: &mut Context<EpsilonId, Epsilon>
     sensitivity_context: &mut Context<SensitivityId, f64>
-) throws -> Procedure {
-    let list_sens = SensitivityId(id: 1)
-    sensitivity_context.insert(list_sens, 1f64)
+) throws -> [Procedure] {
+    let list_sens = new_sensitivity(1f64, sensitivity_context)
 
     let pair_left = make_type(&mut type_map
         Type::TypeWithSec(
@@ -1336,14 +1793,12 @@ fn make_test_program(
     epsilon_context.insert(EpsilonId(id: 0), Epsilon::Fixed(1f64))
     epsilon_context.insert(EpsilonId(id: 1), Epsilon::Fixed(1f64))
 
-    let xs_type = make_type(&mut type_map, Type::List(type: pair_left, size: 100))
-    let ys_type = make_type(&mut type_map, Type::List(type: pair_right, size: 100))
-    let pair_ret = make_type(&mut type_map, Type::List(type: pairs, size: 100))
+    let xs_type = make_type(&mut type_map, Type::List(type: pair_left, size: 2))
+    let ys_type = make_type(&mut type_map, Type::List(type: pair_right, size: 2))
+    let pair_ret = make_type(&mut type_map, Type::List(type: pairs, size: 2))
 
-    let xs_sens = SensitivityId(id: 2)
-    sensitivity_context.insert(xs_sens, 1f64)
-    let ys_sens = SensitivityId(id: 3)
-    sensitivity_context.insert(ys_sens, 1f64)
+    let xs_sens = new_sensitivity(1f64, sensitivity_context)
+    let ys_sens = new_sensitivity(1f64, sensitivity_context)
 
     let zip = Procedure(
         name: "zip"
@@ -1355,8 +1810,12 @@ fn make_test_program(
         body: Statement::Ignore.with_type(type: pair_ret, sensitivity: list_sens)
     )
 
+    type_level_sensitivity_context.insert(xs_type, list_sens)
+    type_level_sensitivity_context.insert(ys_type, list_sens)
+    type_level_sensitivity_context.insert(pair_ret, list_sens)
+
     let first = Statement::Assign(
-        var: "x"
+        var: "z"
         value: Expression::ForEach(
             var: "v"
             index: "i"
@@ -1398,8 +1857,8 @@ fn make_test_program(
             value: Expression::Operation(
                 op: Operation::Div
                 operands: [
-                    Expression::Variable(name: "x")
-                    Expression::IntLiteral(value: 100)
+                    Expression::Variable(name: "z")
+                    Expression::IntLiteral(value: 2)
                 ]
             )
         )
@@ -1417,12 +1876,37 @@ fn make_test_program(
             "xs": SensitivityMapped(value: xs_type, sensitivity: Some(xs_sens))
             "ys": SensitivityMapped(value: ys_type, sensitivity: Some(ys_sens))
         ]
-        return_type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: -1000i64, to: 1000i64)))
+        return_type: make_type(&mut type_map, Type::Unchecked)
         body: Statement::Sequence(
             first
             second
         )
     )
 
-    return wavg
+    let main = Procedure(
+        name: "main"
+        parameters: [:]
+        return_type: make_type(&mut type_map, Type::Unchecked)
+        body: Statement::Return(
+            Expression::Call(
+                procedure: wavg
+                arguments: [
+                    Expression::ListLiteral(
+                        elements: [
+                            Expression::IntLiteral(value: 1)
+                            Expression::IntLiteral(value: 2)
+                        ]
+                    )
+                    Expression::ListLiteral(
+                        elements: [
+                            Expression::IntLiteral(value: 3)
+                            Expression::IntLiteral(value: 4)
+                        ]
+                    )
+                ]
+            )
+        )
+    )
+
+    return [main, zip, wavg]
 }
