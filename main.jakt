@@ -1,3 +1,5 @@
+import jakt::prelude::configuration { UserConfiguration }
+
 import extern "AK/Math.h" {
     extern fn min<T>(anon a: T, anon b: T) -> T
     extern fn max<T>(anon a: T, anon b: T) -> T
@@ -1498,7 +1500,7 @@ fn typecheck(
     return proc
 }
 
-fn main() {
+fn main(args: [String]) {
     mut type_map: [TypeId:Type] = [unchecked(): Type::Unchecked]
     mut type_context: Context<String, TypeId> = Context(map: [:])
     mut type_level_sensitivity_context: Context<TypeId, SensitivityId> = Context(map: [:])
@@ -1521,6 +1523,8 @@ fn main() {
         ] as! [Label:Epsilon]
         &map_direct
     )
+    
+    let test_name = args[1..].first() ?? "wavg"
 
     let procs = make_test_program(
         &lattice
@@ -1529,7 +1533,15 @@ fn main() {
         &mut type_level_sensitivity_context
         &mut epsilon_context
         &mut sensitivity_context
-        Sample::NoisyMax
+        match test_name {
+            "wavg" => Sample::Wavg
+            "noisymax" => Sample::NoisyMax
+            else => {
+                eprintln("Unknown test: {}", test_name)
+                eprintln("Available tests: wavg, noisymax")
+                return 1
+            }
+        }
         0..scale
     )
 
