@@ -359,7 +359,7 @@ boxed enum Type {
 }
 
 enum Operation {
-    Add, Sub, Mul, Div, Pair
+    Add, Sub, Mul, Div, Pair, Gt
 }
 
 boxed enum Expression {
@@ -617,6 +617,7 @@ fn to_lang(this, type_map: &[TypeId: Type], indent: usize = 0) throws -> String 
                 Mul => "*"
                 Div => "/"
                 Pair => ","
+                Gt => ">"
             }
             mut builder = StringBuilder::create()
             builder.append("(")
@@ -797,6 +798,7 @@ fn merge_bounds(
                     Bounded(from: from2, to: to2) => match op {
                         Add => InferredRange::Bounded(from: from1 + from2, to: to1 + to2)
                         Sub => InferredRange::Bounded(from: from1 - to2, to: to1 - from2)
+                        Gt => InferredRange::Bounded(from: match from1 > from2 { true => 1, false => 0 }, to: match to1 > to2 { true => 1, false => 0 })
                         Mul => InferredRange::Bounded(
                             from: min(min(from1 * from2, from1 * to2), min(to1 * from2, to1 * to2))
                             to: max(max(from1 * from2, from1 * to2), max(to1 * from2, to1 * to2))
@@ -828,6 +830,10 @@ fn merge_bounds(
                         Mul => InferredRange::Bounded(from: from1 and from2, to: to1 and to2)
                         Sub => InferredRange::Bounded(from: from1 and not to2, to: to1 and not from2)
                         Div => InferredRange::Bounded(from: from1 and not to2, to: to1 and not from2)
+                        Gt => {
+                            eprintln("Invalid operation for bool: Gt")
+                            abort()
+                        }
                         Pair => {
                             eprintln("Invalid operation for int: Pair")
                             abort()
@@ -925,6 +931,7 @@ fn sens_merge(
     let result = match op {
         Add | Sub => value1 + value2 + local_sensitivity
         Mul | Div => value1 * rhs_max_diff + value2 * lhs_max_diff + local_sensitivity
+        Gt => 1f64
         Pair => 1f64
     }
 
@@ -1219,7 +1226,19 @@ fn typecheck(
             let accum_var_type = accum_init_expr.type.value
             let entry_var_type = list_type.element_type(&mut type_map)
             mut new_type_context = child_context(*type_context)
-            new_type_context.insert(var, entry_var_type)
+            new_type_context.insert(var, match type_map[entry_var_type] {
+                TypeWithSec(type, label, epsilon) => {
+                    let div_eps = EpsilonId(id: epsilon_context.map.size() as! u64)
+                    epsilon_context.insert(div_eps, Epsilon::Fixed(1f64 / list_type.element_count(&type_map) as! f64))
+                    let split_eps = EpsilonId(id: epsilon_context.map.size() as! u64)
+                    epsilon_context.insert(split_eps, Epsilon::Multiply(a: epsilon, b: div_eps))
+                    yield make_type(
+                        &mut type_map
+                        Type::TypeWithSec(type, label, epsilon: split_eps)
+                    )
+                }
+                else => entry_var_type
+            })
             let entry_var_sens = SensitivityId(id: sensitivity_context.map.size() as! u64)
             sensitivity_context.insert(entry_var_sens, 1f64)
             new_type_sensitivity_context.map.set(entry_var_type, entry_var_sens)
@@ -1470,7 +1489,6 @@ fn typecheck(
             sensitivity_context.lookup(return_sens!)
         )
         eprintln("Body: {}", checked_body.to_tree(&type_map))
-        abort()
     }
 
     if return_sens is Some(value) {
@@ -1486,7 +1504,8 @@ fn main() {
     mut type_level_sensitivity_context: Context<TypeId, SensitivityId> = Context(map: [:])
     mut epsilon_context: Context<EpsilonId, Epsilon> = Context(map: [:])
     mut sensitivity_context: Context<SensitivityId, f64> = Context(map: [:])
-    let map_direct = fn(anon from: Label, anon to: Label, anon available_epsilon: Epsilon) -> f64 => 1.0f64 // todo!
+    let scale = 499
+    let map_direct = fn[scale](anon from: Label, anon to: Label, anon available_epsilon: Epsilon) -> f64 => scale as! f64 // todo!
     mut lattice = LabelLattice::make(
         hierarchy: [
             "Public": []
@@ -1511,7 +1530,7 @@ fn main() {
         &mut epsilon_context
         &mut sensitivity_context
         Sample::NoisyMax
-        0..100
+        0..scale
     )
 
     mut checked_procs: [Procedure] = []
@@ -1605,11 +1624,45 @@ fn codegen(
 
     // e*(...)
     println("using Epsilon = variant<double, string>;")
-    println("Epsilon emul(Epsilon a, Epsilon b) {{ return a; }}")
-    println("Epsilon esub(Epsilon a, Epsilon b) {{ return a; }}")
-    println("Epsilon emax(Epsilon a, Epsilon b) {{ return a; }}")
-    println("Epsilon emin(Epsilon a, Epsilon b) {{ return a; }}")
-    println("Epsilon evar(string name) {{ return name; }}")
+    println("Epsilon emul(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() == 0 && b.index() == 0) {{")
+    println("        return get<double>(a) * get<double>(b);")
+    println("    }} else {{")
+    println("        cerr << \"Runtime epsilon variable\" << endl;")
+    println("        abort();")
+    println("    }}")
+    println("}}")
+
+    println("Epsilon esub(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() == 0 && b.index() == 0) {{")
+    println("        return get<double>(a) - get<double>(b);")
+    println("    }} else {{")
+    println("        cerr << \"Runtime epsilon variable\" << endl;")
+    println("        abort();")
+    println("    }}")
+    println("}}")
+
+    println("Epsilon emax(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() == 0 && b.index() == 0) {{")
+    println("        return max(get<double>(a), get<double>(b));")
+    println("    }} else {{")
+    println("        cerr << \"Runtime epsilon variable\" << endl;")
+    println("        abort();")
+    println("    }}")
+    println("}}")
+
+    println("Epsilon emin(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() == 0 && b.index() == 0) {{")
+    println("        return min(get<double>(a), get<double>(b));")
+    println("    }} else {{")
+    println("        cerr << \"Runtime epsilon variable: \" << endl;")
+    println("        abort();")
+    println("    }}")
+    println("}}")
+
+    println("Epsilon evar(string name) {{")
+    println("    return 50.0;")
+    println("}}")
     println()
 
     mut epsilon_context_copy = epsilon_context.mutable_snapshot()
@@ -1651,7 +1704,7 @@ fn codegen(
     for (id, epsilon) in epsilon_context {
         print("Epsilon E{} = ", id.id)
         match epsilon {
-            Fixed(value) => print("{:.1f}", value)
+            Fixed(value) => print("{:.5f}", value)
             Multiply(a, b) => print("emul(E{}, E{})", a.id, b.id)
             Subtract(a, b) => print("esub(E{}, E{})", a.id, b.id)
             Max(a, b) => print("emax(E{}, E{})", a.id, b.id)
@@ -1664,6 +1717,9 @@ fn codegen(
     // noise(x, e) = laplace(x, e)
     println("template<typename T>")
     println("T noise(T x, Epsilon epsilon) {{")
+    println("#ifdef NO_NOISE")
+    println("    return x;")
+    println("#else")
     println("    if (epsilon.index() == 0) {{")
     println("        double e = get<double>(epsilon);")
     println("        random_device rd;")
@@ -1680,6 +1736,7 @@ fn codegen(
     println("        cerr << \"Runtime epsilon variable: \" << name << endl;")
     println("        abort();")
     println("    }}")
+    println("#endif")
     println("}}")
 
     // declassify(...)
@@ -1782,6 +1839,7 @@ fn codegen(
                     Sub => "-"
                     Mul => "*"
                     Div => "/"
+                    Gt => ">"
                     Pair => { abort() }
                 }
                 mut first = true
@@ -2135,7 +2193,26 @@ fn make_test_program(
 
         let xs_type = make_type(
             &mut type_map
-            Type::List(type: make_type(&mut type_map, Type::Int(InferredRange::Unknown)), size: list_size as! usize)
+            Type::List(
+                type: make_type(
+                    &mut type_map
+                    Type::TypeWithSec(
+                        type: make_type(&mut type_map, type: Type::Int(InferredRange::Bounded(from: 0, to: 69)))
+                        label: Label(name: "L1")
+                        epsilon: EpsilonId(id: 0)
+                    )
+                )
+                size: list_size as! usize
+            )
+        )
+
+        let return_type = make_type(
+            &mut type_map
+            Type::TypeWithSec(
+                type: make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: 0, to: 69)))
+                label: Label(name: "L2")
+                epsilon: EpsilonId(id: 1)
+            )
         )
 
         let xs_sens = new_sensitivity(1f64, sensitivity_context)
@@ -2153,7 +2230,7 @@ fn make_test_program(
             parameters: [
                 "xs": SensitivityMapped(value: xs_type, sensitivity: Some(list_sens))
             ]
-            return_type: make_type(&mut type_map, Type::Unchecked)
+            return_type
             body: Expression::Subscript(
                 expr: Expression::ForEach(
                     var: "x"
@@ -2177,7 +2254,7 @@ fn make_test_program(
                         )
                         body: Expression::IfThenElse(
                             condition: Expression::Operation(
-                                op: Operation::Sub
+                                op: Operation::Gt
                                 operands: [
                                     Expression::Variable(name: "score")
                                     Expression::Subscript(
