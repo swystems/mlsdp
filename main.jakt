@@ -845,7 +845,7 @@ fn merge_bounds(
             })
             else => {
                 eprintln("Type mismatch between {} and {}", type1, type2)
-                return type1
+                throw Error::from_string_literal("type mismatch")
             }
         }
         Pair(left, right) => match type2 {
@@ -1500,6 +1500,15 @@ fn typecheck(
     return proc
 }
 
+fn read_file(anon path: String?) throws -> [u8] {
+    if not path.has_value() {
+        throw Error::from_string_literal("no path provided")
+    }
+
+    mut file = File::open_for_reading(path!)
+    return file.read_all()
+}
+
 fn main(args: [String]) {
     mut type_map: [TypeId:Type] = [unchecked(): Type::Unchecked]
     mut type_context: Context<String, TypeId> = Context(map: [:])
@@ -1526,24 +1535,45 @@ fn main(args: [String]) {
     
     let test_name = args[1..].first() ?? "wavg"
 
-    let procs = make_test_program(
-        &lattice
-        &mut type_map
-        &mut type_context
-        &mut type_level_sensitivity_context
-        &mut epsilon_context
-        &mut sensitivity_context
-        match test_name {
-            "wavg" => Sample::Wavg
-            "noisymax" => Sample::NoisyMax
-            else => {
-                eprintln("Unknown test: {}", test_name)
-                eprintln("Available tests: wavg, noisymax")
-                return 1
-            }
-        }
-        0..scale
+    mut parser = Parser(type_map, epsilon_map: epsilon_context.map)
+    mut source = read_file(args[1..].first())
+    mut lexer = Lexer(input: source)
+    sensitivity_context.insert(SensitivityId(id: 0), 1f64)
+    sensitivity_context.insert(SensitivityId(id: 1), 1f64)
+
+    let main_contents = try parser.parse(&mut lexer) catch err {
+        eprintln("Error: {}", err)
+        eprintln("At offset: {}", lexer.offset)
+        return 1
+    }
+
+    mut procs = parser.procedures
+    let main_params: [String:SensitivityMapped<TypeId>] = [:]
+    let main_return_type = TypeId(id: type_map.size() as! u64)
+    type_map.set(main_return_type, Type::Unchecked)
+    procs.push(
+        Procedure(name: "main", parameters: main_params, return_type: main_return_type, body: main_contents)
     )
+
+
+    // let procs = make_test_program(
+    //     &lattice
+    //     &mut type_map
+    //     &mut type_context
+    //     &mut type_level_sensitivity_context
+    //     &mut epsilon_context
+    //     &mut sensitivity_context
+    //     match test_name {
+    //         "wavg" => Sample::Wavg
+    //         "noisymax" => Sample::NoisyMax
+    //         else => {
+    //             eprintln("Unknown test: {}", test_name)
+    //             eprintln("Available tests: wavg, noisymax")
+    //             return 1
+    //         }
+    //     }
+    //     0..scale
+    // )
 
     mut checked_procs: [Procedure] = []
     for proc in procs {
@@ -2312,6 +2342,413 @@ fn make_test_program(
         //        let score = declassify(x, e1/N, L2, e2/N) in
         //            if score > 42 s + 1 else s)
         let list_sens = new_sensitivity(1f64, sensitivity_context)
+        abort()
+    }
+}
+
+enum Token {
+    index: usize
+
+    Arrow
+    Colon
+    Comma
+    Dash
+    Dot
+    Ecks // ×
+    Else
+    Eof
+    Equal
+    Foreach
+    If
+    In
+    IntLiteral(value: i64)
+    LBrace
+    LParen
+    LSquare
+    Let
+    Name(value: String)
+    Plus
+    Proc
+    RBrace
+    RParen
+    RSquare
+    Slash
+    Star
+    Then
+}
+
+fn todo() -> never {
+    eprintln("todo")
+    abort()
+}
+
+struct Lexer {
+    input: [u8]
+    offset: usize = 0
+    committed_offset: usize = 0
+
+    fn next(mut this) throws -> Token {
+        .offset = .committed_offset
+        let token = .peek()
+        .committed_offset = .offset
+        return token
+    }
+
+    fn peek(mut this) throws -> Token {
+        .offset = .committed_offset
+        while .offset < .input.size() {
+            let c = .input[.offset]
+            if c == b' ' or c == b'\t' or c == b'\n' {
+                .offset += 1
+                continue
+            }
+
+            return match c {
+                b'0'..b'9' | b'9' => {
+                    return .lex_number()
+                }
+                b'a'..b'z' | b'A'..b'Z' | b'_' | b'z' | b'Z' => {
+                    return .lex_name()
+                }
+                b'(' => .consume(1, Token::LParen(index: .offset))
+                b')' => .consume(1, Token::RParen(index: .offset))
+                b'{' => .consume(1, Token::LBrace(index: .offset))
+                b'}' => .consume(1, Token::RBrace(index: .offset))
+                b'[' => .consume(1, Token::LSquare(index: .offset))
+                b']' => .consume(1, Token::RSquare(index: .offset))
+                b',' => .consume(1, Token::Comma(index: .offset))
+                b':' => .consume(1, Token::Colon(index: .offset))
+                b'*' => .consume(1, Token::Star(index: .offset))
+                b'/' => .consume(1, Token::Slash(index: .offset))
+                b'-' => {
+                    if .offset + 1 < .input.size() {
+                        if .input[.offset + 1] == b'>' {
+                            return .consume(2, Token::Arrow(index: .offset))
+                        }
+                        if .input[.offset + 1] >= b'0' and .input[.offset + 1] <= b'9' {
+                            return .lex_number()
+                        }
+                    }
+                    yield .consume(1, Token::Dash(index: .offset))
+                }
+                b'.' => .consume(1, Token::Dot(index: .offset))
+                b'=' => .consume(1, Token::Equal(index: .offset))
+                else => {
+                    eprintln("unexpected character in token stream: {:c} at offset {}", c, .offset)
+                    throw Error::from_string_literal("unexpected character in token stream")
+                }
+            }
+        }
+
+        return Token::Eof(index: .offset)
+    }
+
+    fn lex_number(mut this) throws -> Token {
+        let index = .offset
+        mut value: i64 = 0
+        mut is_negative = match .input[.offset] {
+            b'-' => { 
+                .offset += 1
+                yield true
+            }
+            else => false
+        }
+
+        while .offset < .input.size() and .input[.offset] >= b'0' and .input[.offset] <= b'9' {
+            value = value * 10 + (.input[.offset] - b'0') as! i64
+            .offset += 1
+        }
+
+        if is_negative {
+            value = -value
+        }
+
+        return Token::IntLiteral(index, value)
+    }
+
+    fn lex_name(mut this) throws -> Token {
+        let index = .offset
+        mut value = StringBuilder::create()
+        while .offset < .input.size() and
+            .input[.offset] >= b'a' and
+            .input[.offset] <= b'z' or
+            .input[.offset] >= b'A' and
+            .input[.offset] <= b'Z' or
+            .input[.offset] >= b'0' and
+            .input[.offset] <= b'9' or
+            .input[.offset] == b'_' {
+
+            value.append(.input[.offset])
+            .offset += 1
+        }
+
+        let name = value.to_string()
+        return match name {
+            "foreach" => Token::Foreach(index)
+            "if" => Token::If(index)
+            "else" => Token::Else(index)
+            "then" => Token::Then(index)
+            "in" => Token::In(index)
+            "proc" => Token::Proc(index)
+            "let" => Token::Let(index)
+            "×" => Token::Ecks(index)
+            else => Token::Name(index, value: name)
+        }
+    }
+
+    fn consume(mut this, anon count: usize, anon token: Token) -> Token {
+        .offset += count
+        return token
+    }
+}
+
+struct Parser {
+    procedures: [Procedure] = []
+    type_map: [TypeId:Type]
+    epsilon_name_map: [String:EpsilonId] = [:]
+    epsilon_map: [EpsilonId:Epsilon]
+
+    fn parse_base(
+        mut this
+        lexer: &mut Lexer
+    ) throws -> Expression {
+        let initial = lexer.peek()
+        return match lexer.next() {
+            IntLiteral(value) => Expression::IntLiteral(value)
+            Name(value) => Expression::Variable(name: value)
+            LParen => {
+                let inner = .parse(lexer, comma_can_be_pair: true)
+                guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
+                return inner
+            }
+            LSquare => {
+                // [expr,*]
+                mut elements: [Expression] = []
+                loop {
+                    match lexer.peek() {
+                        RSquare => {
+                            lexer.next()
+                            break
+                        }
+                        Comma => {
+                            lexer.next()
+                            continue
+                        }
+                        else => {
+                            elements.push(.parse(lexer))
+                        }
+                    }
+                }
+                return Expression::ListLiteral(elements)
+            }
+            Let => {
+                guard lexer.next() is Name(value: var) else { throw Error::from_string_literal("expected name") }
+                guard lexer.next() is Equal else { throw Error::from_string_literal("expected '='") }
+                match lexer.peek() {
+                    Proc => {
+                        lexer.next()
+                        guard lexer.next() is LParen else { throw Error::from_string_literal("expected '('") }
+                        mut parameters: [String:SensitivityMapped<TypeId>] = [:]
+                        loop {
+                            let next = lexer.next()
+                            match next {
+                                Eof => {
+                                    throw Error::from_string_literal("expected ')'")
+                                }
+                                RParen => {
+                                    break
+                                }
+                                Comma => {
+                                    continue
+                                }
+                                else => {}
+                            }
+                            guard next is Name(value: name) else { throw Error::from_string_literal("expected name") }
+                            guard lexer.next() is Colon else { throw Error::from_string_literal("expected ':'") }
+                            let type = .parse_type(lexer)
+                            parameters.set(name, SensitivityMapped(value: type, sensitivity: None))
+                        }
+                        guard lexer.next() is Arrow else { throw Error::from_string_literal("expected '->'") }
+                        let return_type = .parse_type(lexer)
+                        let body = .parse(lexer)
+                        .procedures.push(Procedure(name: var, parameters, return_type, body))
+                        guard lexer.next() is In else { throw Error::from_string_literal("expected 'in'") }
+                        return .parse(lexer)
+                    }
+                    else => {
+                        let value = .parse(lexer)
+                        guard lexer.next() is In else { throw Error::from_string_literal("expected 'in'") }
+                        let body = .parse(lexer)
+                        return Expression::Let(var, value, body)
+                    }
+                }
+            }
+            Foreach => {
+                // foreach x in xs index i accum s = expr in
+                guard lexer.next() is Name(value: var) else { throw Error::from_string_literal("expected name") }
+                guard lexer.next() is In else { throw Error::from_string_literal("expected 'in'") }
+                let list = .parse(lexer)
+                guard lexer.next() is Name(
+                    value: indkw
+                ) and indkw == "index" else { throw Error::from_string_literal("expected 'index'") }
+                guard lexer.next() is Name(value: index) else { throw Error::from_string_literal("expected name") }
+                guard lexer.next() is Name(
+                    value: acckw
+                ) and acckw == "accum" else { throw Error::from_string_literal("expected 'accum'") }
+                guard lexer.next() is Name(value: accum) else { throw Error::from_string_literal("expected name") }
+                guard lexer.next() is Equal else { throw Error::from_string_literal("expected '='") }
+                let accum_init = .parse(lexer)
+                guard lexer.next() is In else { throw Error::from_string_literal("expected 'in'") }
+                let body = .parse(lexer)
+                return Expression::ForEach(var, index, accum, accum_init, list, body)
+            }
+            If => {
+                let condition = .parse(lexer)
+                guard lexer.next() is Then else { throw Error::from_string_literal("expected 'then'") }
+                let consequence = .parse(lexer)
+                guard lexer.next() is Else else { throw Error::from_string_literal("expected 'else'") }
+                let alternative = .parse(lexer)
+                return Expression::IfThenElse(condition, consequence, alternative)
+            }
+            Eof => {
+                throw Error::from_string_literal("unexpected EOF")
+            }
+            else => {
+                eprintln("unexpected token: {}", initial)
+                throw Error::from_string_literal("unexpected token")
+            }
+        }
+    }
+
+    fn parse(
+        mut this
+        lexer: &mut Lexer
+        comma_can_be_pair: bool = false
+    ) throws -> Expression {
+        mut base = .parse_base(lexer)
+        loop {
+            match lexer.peek() {
+                LSquare => {
+                    // expr[index]
+                    lexer.next()
+                    let index = .parse(lexer)
+                    guard lexer.next() is RSquare else { throw Error::from_string_literal("expected ']'") }
+                    base = Expression::Subscript(expr: base, index)
+                }
+                Comma => {
+                    if comma_can_be_pair {
+                        lexer.next()
+                        let right = .parse(lexer)
+                        base = Expression::Operation(op: Operation::Pair, operands: [base, right])
+                    } else {
+                        return base
+                    }
+                }
+                Plus | Dash | Slash | Star => {
+                    let op = lexer.next()
+                    let right = .parse(lexer)
+                    base = Expression::Operation(op: match op {
+                        Plus => Operation::Add
+                        Dash => Operation::Sub
+                        Slash => Operation::Div
+                        Star => Operation::Mul
+                        else => {
+                            abort()
+                        }
+                    }, operands: [base, right])
+                }
+                else => {
+                    return base
+                }
+            }
+        }
+        return base
+    }
+
+    fn parse_type_base(
+        mut this
+        lexer: &mut Lexer
+    ) throws -> TypeId => match lexer.next() {
+        Name(value) => match value {
+            "list" => {
+                let inner = .parse_type(lexer)
+                guard lexer.next() is IntLiteral(value: size) else { throw Error::from_string_literal("expected size") }
+                let type_id = TypeId(id: .type_map.size() as! u64)
+                .type_map.set(type_id, Type::List(type: inner, size: size as! usize))
+                return type_id
+            }
+            "int" => {
+                let type_id = TypeId(id: .type_map.size() as! u64)
+                .type_map.set(type_id, Type::Int(InferredRange::Unknown))
+                return type_id
+            }
+            else => {
+                throw Error::from_string_literal("expected type")
+            }
+        }
+        LParen => {
+            let inner = .parse_type(lexer)
+            guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
+            return inner
+        }
+        else => {
+            throw Error::from_string_literal("expected type")
+        }
+    }
+
+
+    fn parse_type(
+        mut this
+        lexer: &mut Lexer
+    ) throws -> TypeId {
+        mut base = .parse_type_base(lexer)
+        loop {
+            match lexer.peek() {
+                Ecks | Comma => {
+                    lexer.next()
+                    let right = .parse_type(lexer)
+                    let type_id = TypeId(id: .type_map.size() as! u64)
+                    .type_map.set(type_id, Type::Pair(left: base, right: right))
+                    base = type_id
+                }
+                Name(value) => match value {
+                    "lab" => {
+                        lexer.next()
+                        guard lexer.next() is LBrace else { throw Error::from_string_literal("expected '{'") }
+                        guard lexer.next() is Name(value: label) else { throw Error::from_string_literal("expected label name") }
+                        guard lexer.next() is RBrace else { throw Error::from_string_literal("expected '}'") }
+
+                        // lab{} eps{}
+                        guard lexer.next() is Name(value) and value == "eps" else { throw Error::from_string_literal("expected 'eps'") }
+                        guard lexer.next() is LBrace else { throw Error::from_string_literal("expected '{'") }
+                        guard lexer.next() is Name(value: epsilon) else { throw Error::from_string_literal("expected epsilon name") }
+                        guard lexer.next() is RBrace else { throw Error::from_string_literal("expected '}'") }
+
+                        let epsilon_id = match .epsilon_name_map.contains(epsilon) {
+                            true => .epsilon_name_map[epsilon]
+                            false => {
+                                let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
+                                .epsilon_map.set(epsilon_id, Epsilon::RuntimeVar(name: epsilon))
+                                .epsilon_name_map.set(epsilon, epsilon_id)
+                                yield epsilon_id
+                            }
+                        }
+
+                        let type_id = TypeId(id: .type_map.size() as! u64)
+                        .type_map.set(type_id, Type::TypeWithSec(type: base, label: Label(name: label), epsilon: epsilon_id))
+                        base = type_id
+                    }
+                    else => {
+                        return base
+                    }
+                }
+                else => {
+                    return base
+                }
+            }
+        }
+
+        // unreachable
         abort()
     }
 }
