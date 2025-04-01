@@ -782,6 +782,90 @@ fn make_type(
     return id
 }
 
+fn unify(
+    type_map: &mut [TypeId: Type]
+    epsilon_context: &mut Context<EpsilonId, Epsilon>
+    anon type1: Type
+    anon type2: Type
+) throws -> Type {
+    if type2 is TypeWithSec and not type1 is TypeWithSec { return unify(type_map, epsilon_context, type2, type1) }
+    if type2 is Unchecked { return type1 }
+
+    return match type1 {
+        Unchecked => type2
+        Int(range1) => match type2 {
+            Int(range2) => Type::Int(match range1 {
+                Unknown => range1
+                Bounded(from: from1, to: to1) => match range2 {
+                    Unknown => range2
+                    Bounded(from: from2, to: to2) => InferredRange::Bounded(from: min(from1, from2), to: max(to1, to2))
+                }
+            })
+            else => {
+                eprintln("Type mismatch between {} and {}", type1, type2)
+                abort()
+            }
+        }
+        Bool(range1) => match type2 {
+            Bool(range2) => Type::Bool(match range1 {
+                Unknown => range1
+                Bounded(from: from1, to: to1) => match range2 {
+                    Unknown => range2
+                    Bounded(from: from2, to: to2) => InferredRange::Bounded(from: min(from1, from2), to: max(to1, to2))
+                }
+            })
+            else => {
+                eprintln("Type mismatch between {} and {}", type1, type2)
+                abort()
+            }
+        }
+        Pair(left, right) => match type2 {
+            Pair(left: left2, right: right2) => {
+                let left_type = type_map[left]
+                let right_type = type_map[right]
+                let new_left = unify(type_map, epsilon_context, left_type, type_map[left2])
+                let new_right = unify(type_map, epsilon_context, right_type, type_map[right2])
+                yield Type::Pair(left: make_type(type_map, new_left), right: make_type(type_map, new_right))
+            }
+            TypeWithSec => unify(type_map, epsilon_context, type2, type1)
+            else => {
+                eprintln("Type mismatch between {} and {}", type1, type2)
+                abort()
+            }
+        }
+        List(type, size) => {
+            if type2 is List(type: type2, size: size2) {
+                if size != size2 {
+                    eprintln("List size mismatch between {} and {}", type1, type2)
+                    abort()
+                }
+                let inner = make_type(type_map, unify(type_map, epsilon_context, type_map[type], type_map[type2]))
+                return Type::List(type: inner, size)
+            } else {
+                eprintln("Type mismatch between {} and {}", type1, type2)
+                abort()
+            }
+        }
+        TypeWithSec(type: ty1, label: label1, epsilon: epsilon1) => match type2 {
+            TypeWithSec(type: ty2, label: label2, epsilon: epsilon2) => {
+                // TODO: Subtyping for these.
+                if label1 != label2 {
+                    eprintln("Label mismatch between {} and {}", type1.render(&type_map), type2.render(&type_map))
+                    return type2
+                }
+                let inner = unify(type_map, epsilon_context, type_map[ty1], type_map[ty2])
+                let epsilon = EpsilonId(id: epsilon_context.map.size() as! u64)
+                epsilon_context.insert(epsilon, Epsilon::Min(a: epsilon1, b: epsilon2))
+                yield Type::TypeWithSec(type: make_type(type_map, inner), label: label1, epsilon)
+            }
+            else => {
+                eprintln("Type mismatch between {} and {}", type1.render(&type_map), type2.render(&type_map))
+                abort()
+            }
+        }
+    }
+}
+
 fn merge_bounds(
     type_map: &mut [TypeId: Type]
     epsilon_context: &mut Context<EpsilonId, Epsilon>
@@ -964,7 +1048,7 @@ fn typecheck(
                 if element_type is None {
                     element_type = checked_element.type.value
                 } else {
-                    element_type = make_type(&mut type_map, merge_bounds(type_map, epsilon_context, type_map[element_type!], type_map[checked_element.type.value], op: Operation::Add))
+                    element_type = make_type(&mut type_map, unify(type_map, epsilon_context, type_map[element_type!], type_map[checked_element.type.value]))
                 }
             }
             if element_type is None {
@@ -1138,7 +1222,11 @@ fn typecheck(
                     ) throws -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) {
                         let acc_type = type_map[acc.0.value]
                         let x_type = type_map[x.0.value]
-                        // FIXME: Implement type unification + sensitivity merging
+                        let merged_bounds_acc = merge_bounds(type_map, epsilon_context, acc_type, x_type, op)
+                        let merged_type = make_type(
+                            &mut type_map
+                            unify(type_map, epsilon_context, merged_bounds_acc, x_type)
+                        )
                         let local_sensitivity = match x.0.sensitivity.has_value() {
                             true => x.1.lookup(x.0.sensitivity!)
                             false => 0f64
@@ -1154,7 +1242,7 @@ fn typecheck(
                             x_type
                         )
                         let sens = SensitivityMapped(
-                            value: make_type(type_map, merge_bounds(type_map, epsilon_context, acc_type, x_type, op))
+                            value: merged_type
                             sensitivity
                         )
                         return (sens, acc.1)
@@ -1314,7 +1402,7 @@ fn typecheck(
 
             let consequence_type = type_map[checked_consequence.type.value]
             let alternative_type = type_map[checked_alternative.type.value]
-            let new_type = make_type(type_map, merge_bounds(type_map, epsilon_context, consequence_type, alternative_type, op: Operation::Add))
+            let new_type = make_type(type_map, unify(type_map, epsilon_context, consequence_type, alternative_type))
             let new_sens = sens_merge(
                 type_level_sensitivity_context.find(checked_consequence.type.value)
                 type_level_sensitivity_context.find(checked_alternative.type.value)
@@ -1353,7 +1441,7 @@ fn typecheck(
                 true => {
                     let var_type = maybe_var_type!
                     let value_type = type_map.get(checked_value.type.value)!
-                    let new_type = merge_bounds(type_map, epsilon_context, type_map[var_type], value_type, op: Operation::Add)
+                    let new_type = unify(type_map, epsilon_context, type_map[var_type], value_type)
                     let new_sens = sens_merge(
                         type_level_sensitivity_context.find(var_type)
                         checked_value.type.sensitivity
@@ -1469,7 +1557,7 @@ fn typecheck(
         Unchecked => proc.return_type
         else => {
             proc.body = checked_body
-            yield make_type(type_map, return_type)
+            yield make_type(&mut type_map, unify(type_map, epsilon_context, return_type, type_map[proc.return_type]))
         }
     }
     mut return_sens = type_level_sensitivity_context.find(checked_body.type.value)
@@ -1554,6 +1642,10 @@ fn main(args: [String]) {
     procs.push(
         Procedure(name: "main", parameters: main_params, return_type: main_return_type, body: main_contents)
     )
+
+    for proc in procs {
+        eprintln("{}: {}", proc.name, proc.to_tree(&type_map))
+    }
 
 
     // let procs = make_test_program(
