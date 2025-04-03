@@ -301,11 +301,17 @@ boxed enum Type {
     Bool(InferredRange<bool>)
     List(type: TypeId, size: usize)
     Pair(left: TypeId, right: TypeId)
+    Arrow(from: [(String, SensitivityMapped<TypeId>)], to: TypeId)
     TypeWithSec(type: TypeId, label: Label, epsilon: EpsilonId)
 
     fn pure_type(this, type_map: &[TypeId:Type]) -> Type => match this {
         TypeWithSec(type) => type_map[type].pure_type(type_map)
         else => this
+    }
+
+    fn pure_id(anon id: TypeId, type_map: &[TypeId:Type]) -> TypeId => match type_map[id] {
+        TypeWithSec(type) => pure_id(type, type_map)
+        else => id
     }
 
     fn element_type(this, type_map: &mut [TypeId:Type]) -> TypeId => match this {
@@ -353,6 +359,14 @@ boxed enum Type {
         }
         List(type, size) => format("list {} {}", type_map[type].render(type_map, minimal), size)
         Pair(left, right) => format("{} × {}", type_map[left].render(type_map, minimal), type_map[right].render(type_map, minimal))
+        Arrow(from, to) => {
+            mut from_str = StringBuilder::create()
+            for (name, typev) in from {
+                if not from_str.is_empty() { from_str.append(", ") }
+                from_str.appendff("{}: {}", name, type_map[typev.value].render(type_map, minimal))
+            }
+            yield format("({}) -> {}", from_str.to_string(), type_map[to].render(type_map, minimal))
+        }
         TypeWithSec(type: type_id, label: label, epsilon: epsilon) => {
             let inner = type_map[type_id].render(type_map, minimal)
             return format("{} lab({}) eps(e{})", inner, label.name, epsilon.id)
@@ -374,7 +388,7 @@ boxed enum Expression {
     Declassify(expr: Expression, source_epsilon: EpsilonId, target_label: Label, target_epsilon: EpsilonId, used_epsilon: EpsilonId? = None)
     Subscript(expr: Expression, index: Expression)
     Operation(op: Operation, operands: Array<Expression>)
-    Call(procedure: Procedure, arguments: Array<Expression>)
+    Call(procedure: Expression, arguments: Array<Expression>)
     ForEach(var: String, index: String, accum: String, accum_init: Expression, list: Expression, body: Expression)
     IfThenElse(condition: Expression, consequence: Expression, alternative: Expression)
     Let(var: String, value: Expression, body: Expression)
@@ -531,7 +545,7 @@ boxed enum Expression {
                 "{: >{}}call({}) type={} sens=s{}*{}"
                 ""
                 indent
-                procedure.name
+                procedure.to_tree(type_map, indent: 0)
                 type_map[.type.value].render(type_map)
                 .type.sensitivity?.id
                 .type.sensitivity_multiplier
@@ -633,7 +647,7 @@ fn to_lang(this, type_map: &[TypeId: Type], indent: usize = 0) throws -> String 
             return builder.to_string()
         }
         Call(procedure, arguments) => {
-            mut x = format("{}(\n", procedure.name)
+            mut x = procedure.to_lang(type_map)
             for argument in arguments {
                 x += argument.to_lang(type_map, indent: indent + 2)
                 x += ",\n"
@@ -846,12 +860,39 @@ fn unify(
                 abort()
             }
         }
+        Arrow(from: from1, to: to1) => match type2 {
+            Arrow(from: from2, to: to2) => {
+                mut inner_from: [(String, SensitivityMapped<TypeId>)] = []
+                mut i: usize = 0
+                for (name1, type1) in from1 {
+                    defer i += 1
+                    if i >= from2.size() {
+                        eprintln("Arrow parameter mismatch between {} and {}", type1, type2)
+                        abort()
+                    }
+                    let (name2, type2) = from2[i]
+                    if name1 != name2 {
+                        eprintln("Arrow parameter name mismatch between {} and {}", type1, type2)
+                        abort()
+                    }
+
+                    let inner_from1 = make_type(type_map, unify(type_map, epsilon_context, type_map[type1.value], type_map[type2.value]))
+                    inner_from.push((name1, SensitivityMapped(value: inner_from1, sensitivity: type1.sensitivity)))
+                }
+                let inner_to = unify(type_map, epsilon_context, type_map[to1], type_map[to2])
+                yield Type::Arrow(from: inner_from, to: make_type(type_map, inner_to))
+            }
+            else => {
+                eprintln("Type mismatch between {} and {}", type1.render(&type_map), type2.render(&type_map))
+                abort()
+            }
+        }
         TypeWithSec(type: ty1, label: label1, epsilon: epsilon1) => match type2 {
             TypeWithSec(type: ty2, label: label2, epsilon: epsilon2) => {
                 // TODO: Subtyping for these.
                 if label1 != label2 {
                     eprintln("Label mismatch between {} and {}", type1.render(&type_map), type2.render(&type_map))
-                    return type2
+                    abort()
                 }
                 let inner = unify(type_map, epsilon_context, type_map[ty1], type_map[ty2])
                 let epsilon = EpsilonId(id: epsilon_context.map.size() as! u64)
@@ -948,6 +989,10 @@ fn merge_bounds(
         }
         List => {
             eprintln("TODO: Implement list type merging")
+            return type1
+        }
+        Arrow => {
+            eprintln("TODO: Implement arrow type merging")
             return type1
         }
         TypeWithSec(type: ty1, label: label1, epsilon: epsilon1) => match type2 {
@@ -1253,6 +1298,16 @@ fn typecheck(
             yield Expression::Operation(type, op, operands: checked_operands.map(&fn(anon x: &(Expression, Context<SensitivityId, f64>)) throws => x.0))
         }
         Call(procedure, arguments) => {
+            let checked_procedure = typecheck(
+                lattice
+                type_map
+                type_context
+                type_level_sensitivity_context
+                epsilon_context
+                sensitivity_context
+                procedure
+            )
+            let procedure_type = type_map[checked_procedure.type.value]
             mut checked_arguments: [(Expression, Context<SensitivityId, f64>)] = []
             for argument in arguments {
                 mut new_sensitivity_context = child_context(*sensitivity_context)
@@ -1268,13 +1323,19 @@ fn typecheck(
                 checked_arguments.push((result, new_sensitivity_context))
             }
 
+            let raw_proc_type = procedure_type.pure_type(&type_map)
+            guard raw_proc_type is Arrow(from: from_types, to: to_type) else {
+                eprintln("Invalid procedure type: {}", procedure_type.render(&type_map))
+                abort()
+            }
+
             mut new_type_context = child_context(*type_context)
-            for (name, type) in procedure.parameters {
+            for (name, type) in from_types {
                 new_type_context.insert(name, type.value)
             }
             let checked_procedure = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, procedure)
-            let return_type = type_map[checked_procedure.return_type]
-            let return_sens = type_level_sensitivity_context.find(checked_procedure.return_type)
+            let return_type = type_map[to_type]
+            let return_sens = type_level_sensitivity_context.find(to_type)
             let type = make_type(type_map, return_type)
             if return_sens is Some(value) {
                 type_level_sensitivity_context.insert(type, value)
@@ -1512,9 +1573,14 @@ fn typecheck(
     type_level_sensitivity_context: &mut Context<TypeId, SensitivityId>
     epsilon_context: &mut Context<EpsilonId, Epsilon>
     sensitivity_context: &mut Context<SensitivityId, f64>
+    existing_procs: [String:TypeId]
     anon mut proc: Procedure
 ) throws -> Procedure {
     mut new_type_context = child_context(*type_context)
+    for (name, type) in existing_procs {
+        new_type_context.insert(name, type)
+    }
+
     mut new_sensitivity_contexts: [Context<SensitivityId, f64>] = []
     for (name, type) in proc.parameters {
         new_type_context.insert(name, type.value)
@@ -1597,6 +1663,30 @@ fn read_file(anon path: String?) throws -> [u8] {
     return file.read_all()
 }
 
+fn interpret_eps(
+    anon eps: Epsilon
+    epsilon_context: &Context<EpsilonId, Epsilon>
+) -> f64? => match eps {
+        Fixed(value) => value
+        Multiply(a, b) => {
+            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
+            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            if a_value is None or b_value is None {
+                return None
+            }
+            return a_value! * b_value!
+        }
+        Subtract(a, b) => {
+            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
+            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            if a_value is None or b_value is None {
+                return None
+            }
+            return a_value! - b_value!
+        }
+        else => None
+}
+
 fn main(args: [String]) {
     mut type_map: [TypeId:Type] = [unchecked(): Type::Unchecked]
     mut type_context: Context<String, TypeId> = Context(map: [:])
@@ -1623,7 +1713,7 @@ fn main(args: [String]) {
     
     let test_name = args[1..].first() ?? "wavg"
 
-    mut parser = Parser(type_map, epsilon_map: epsilon_context.map)
+    mut parser = Parser(type_map, epsilon_map: epsilon_context.map, sensitivity_context)
     mut source = read_file(args[1..].first())
     mut lexer = Lexer(input: source)
     sensitivity_context.insert(SensitivityId(id: 0), 1f64)
@@ -1668,7 +1758,11 @@ fn main(args: [String]) {
     // )
 
     mut checked_procs: [Procedure] = []
+    mut existing_procs: [String:TypeId] = [:]
+    let unknown_type = make_type(&mut type_map, Type::Unchecked)
+
     for proc in procs {
+        existing_procs.set(proc.name, unknown_type)
         let checked = typecheck(
             &lattice
             &mut type_map
@@ -1676,10 +1770,40 @@ fn main(args: [String]) {
             &mut type_level_sensitivity_context
             &mut epsilon_context
             &mut sensitivity_context
+            existing_procs
             proc
         )
+        mut from: [(String, SensitivityMapped<TypeId>)] = []
+        for entry in checked.parameters {
+            from.push(entry)
+        }
+        let proc_type = make_type(&mut type_map, Type::Arrow(from, to: proc.return_type))
+        existing_procs.set(proc.name, proc_type)
         checked_procs.push(checked)
     }
+
+    match type_map[existing_procs["main"]].pure_type(&type_map) {
+        Arrow(to) => {
+            match type_map[to] {
+                TypeWithSec(type, label, epsilon) => {
+                    if (interpret_eps(epsilon_context.lookup(epsilon), &epsilon_context) ?? 1f64) != 0f64 {
+                        eprintln("Main function may not yield a value with any available budget")
+                        return 1
+                    }
+                }
+                else => {}
+            }
+            if not type_map[to].pure_type(&type_map) is Int {
+                eprintln("Main function must return an integer")
+                return 1
+            }
+        }
+        else => {
+            // Cannot happen.
+            abort()
+        }
+    }
+
 
     for proc in checked_procs {
         eprintln("{}", proc.to_lang(&type_map, indent: 0))
@@ -1987,7 +2111,9 @@ fn codegen(
             }
         }
         Call(procedure, arguments) => {
-            print("{}(", procedure.name)
+            print("(")
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, procedure)
+            print(")(")
             mut first = true
             for argument in arguments {
                 if not first {
@@ -2083,6 +2209,18 @@ fn codegen(
         }
         TypeWithSec(type, label, epsilon) => {
             codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, type)
+        }
+        Arrow(from, to) => {
+            print("function<")
+            codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, to)
+            print("(")
+            for i in 0..from.size() {
+                if i > 0 {
+                    print(", ")
+                }
+                codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, from[i].1.value)
+            }
+            print(")>")
         }
         Unchecked => {
             eprintln("Unchecked type in codegen")
@@ -2222,7 +2360,7 @@ fn make_test_program(
                 accum: "x"
                 accum_init: Expression::IntLiteral(value: 0)
                 list: Expression::Call(
-                    procedure: zip
+                    procedure: Expression::Variable(name: "zip")
                     arguments: [
                         Expression::Variable(name: "xs")
                         Expression::Variable(name: "ys")
@@ -2284,7 +2422,7 @@ fn make_test_program(
             parameters: [:]
             return_type: make_type(&mut type_map, Type::Unchecked)
             body: Expression::Call(
-                procedure: wavg
+                procedure: Expression::Variable(name: "wavg")
                 arguments: [
                     Expression::ListLiteral(
                         elements: xs
@@ -2417,7 +2555,7 @@ fn make_test_program(
             parameters: [:]
             return_type: make_type(&mut type_map, Type::Unchecked)
             body: Expression::Call(
-                procedure: noisymax
+                procedure: Expression::Variable(name: "noisymax")
                 arguments: [
                     Expression::ListLiteral(
                         elements: test_elements
@@ -2445,6 +2583,7 @@ enum Token {
     Colon
     Comma
     Dash
+    Declassify
     Dot
     Ecks // ×
     Else
@@ -2459,6 +2598,7 @@ enum Token {
     LSquare
     Let
     Name(value: String)
+    Noise
     Plus
     Proc
     RBrace
@@ -2523,6 +2663,7 @@ struct Lexer {
                     }
                     yield .consume(1, Token::Dash(index: .offset))
                 }
+                b'+' => .consume(1, Token::Plus(index: .offset))
                 b'.' => .consume(1, Token::Dot(index: .offset))
                 b'=' => .consume(1, Token::Equal(index: .offset))
                 else => {
@@ -2584,6 +2725,8 @@ struct Lexer {
             "proc" => Token::Proc(index)
             "let" => Token::Let(index)
             "×" => Token::Ecks(index)
+            "declassify" => Token::Declassify(index)
+            "noise" => Token::Noise(index)
             else => Token::Name(index, value: name)
         }
     }
@@ -2599,6 +2742,7 @@ struct Parser {
     type_map: [TypeId:Type]
     epsilon_name_map: [String:EpsilonId] = [:]
     epsilon_map: [EpsilonId:Epsilon]
+    sensitivity_context: Context<SensitivityId, f64>
 
     fn parse_base(
         mut this
@@ -2608,6 +2752,56 @@ struct Parser {
         return match lexer.next() {
             IntLiteral(value) => Expression::IntLiteral(value)
             Name(value) => Expression::Variable(name: value)
+            Declassify => {
+                // declassify(expr, source_epsilon, target_label, target_epsilon)
+                guard lexer.next() is LParen else { throw Error::from_string_literal("expected '('") }
+                let expr = .parse(lexer)
+                if lexer.peek() is Comma { lexer.next() }
+                guard lexer.next() is Name(value: source_epsilon) else { throw Error::from_string_literal("expected source epsilon") }
+                if lexer.peek() is Comma { lexer.next() }
+                guard lexer.next() is Name(value: target_label) else { throw Error::from_string_literal("expected target label") }
+                if lexer.peek() is Comma { lexer.next() }
+                guard lexer.next() is Name(value: target_epsilon) else { throw Error::from_string_literal("expected target epsilon") }
+                guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
+                mut source_epsilon_id = .epsilon_name_map.get(source_epsilon)
+                mut target_epsilon_id = .epsilon_name_map.get(target_epsilon)
+
+                if source_epsilon_id is None {
+                    let id = EpsilonId(id: .epsilon_map.size() as! u64)
+                    .epsilon_name_map.set(source_epsilon, id)
+                    .epsilon_map.set(id, Epsilon::RuntimeVar(name: source_epsilon))
+                    source_epsilon_id = Some(id)
+                }
+                if target_epsilon_id is None {
+                    let id = EpsilonId(id: .epsilon_map.size() as! u64)
+                    .epsilon_name_map.set(target_epsilon, id)
+                    .epsilon_map.set(id, Epsilon::RuntimeVar(name: target_epsilon))
+                    target_epsilon_id = Some(id)
+                }
+
+                yield Expression::Declassify(
+                    expr: expr
+                    source_epsilon: source_epsilon_id!
+                    target_label: Label(name: target_label)
+                    target_epsilon: target_epsilon_id!
+                )
+            }
+            Noise => {
+                // noise(expr, epsilon)
+                guard lexer.next() is LParen else { throw Error::from_string_literal("expected '('") }
+                let expr = .parse(lexer)
+                if lexer.peek() is Comma { lexer.next() }
+                guard lexer.next() is Name(value: epsilon) else { throw Error::from_string_literal("expected epsilon") }
+                guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
+                mut epsilon_id = .epsilon_name_map.get(epsilon)
+                if epsilon_id is None {
+                    let id = EpsilonId(id: .epsilon_map.size() as! u64)
+                    .epsilon_name_map.set(epsilon, id)
+                    .epsilon_map.set(id, Epsilon::RuntimeVar(name: epsilon))
+                    epsilon_id = Some(id)
+                }
+                return Expression::Noise(expr: expr, epsilon: epsilon_id!)
+            }
             LParen => {
                 let inner = .parse(lexer, comma_can_be_pair: true)
                 guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
@@ -2658,7 +2852,8 @@ struct Parser {
                             guard next is Name(value: name) else { throw Error::from_string_literal("expected name") }
                             guard lexer.next() is Colon else { throw Error::from_string_literal("expected ':'") }
                             let type = .parse_type(lexer)
-                            parameters.set(name, SensitivityMapped(value: type, sensitivity: None))
+                            let new_sens = new_sensitivity(1f64, sensitivity_context: &mut .sensitivity_context)
+                            parameters.set(name, SensitivityMapped(value: type, sensitivity: new_sens))
                         }
                         guard lexer.next() is Arrow else { throw Error::from_string_literal("expected '->'") }
                         let return_type = .parse_type(lexer)
@@ -2727,6 +2922,12 @@ struct Parser {
                     guard lexer.next() is RSquare else { throw Error::from_string_literal("expected ']'") }
                     base = Expression::Subscript(expr: base, index)
                 }
+                Dot => {
+                    // expr.index
+                    lexer.next()
+                    guard lexer.next() is IntLiteral(value: index) else { throw Error::from_string_literal("expected index") }
+                    base = Expression::Subscript(expr: base, index: Expression::IntLiteral(value: index))
+                }
                 Comma => {
                     if comma_can_be_pair {
                         lexer.next()
@@ -2735,6 +2936,30 @@ struct Parser {
                     } else {
                         return base
                     }
+                }
+                LParen => {
+                    // expr(op...)
+                    lexer.next()
+                    mut arguments: [Expression] = []
+                    loop {
+                        match lexer.peek() {
+                            RParen => {
+                                lexer.next()
+                                break
+                            }
+                            Comma => {
+                                lexer.next()
+                                continue
+                            }
+                            Eof => {
+                                throw Error::from_string_literal("unexpected EOF, expected ')'")
+                            }
+                            else => {
+                                arguments.push(.parse(lexer))
+                            }
+                        }
+                    }
+                    base = Expression::Call(procedure: base, arguments)
                 }
                 Plus | Dash | Slash | Star => {
                     let op = lexer.next()
