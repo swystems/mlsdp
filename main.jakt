@@ -51,7 +51,9 @@ enum Epsilon {
     Min(a: EpsilonId, b: EpsilonId)
     Max(a: EpsilonId, b: EpsilonId)
     Subtract(a: EpsilonId, b: EpsilonId)
+    Add(a: EpsilonId, b: EpsilonId)
     Multiply(a: EpsilonId, b: EpsilonId)
+    Divide(a: EpsilonId, b: EpsilonId)
 }
 
 struct Label implements(Equal<Label>, Hashable, FromStringLiteral) {
@@ -316,7 +318,8 @@ boxed enum Type {
 
     fn element_type(this, type_map: &mut [TypeId:Type]) -> TypeId => match this {
         List(type) => type
-        TypeWithSec(type, label, epsilon) => make_type(type_map, Type::TypeWithSec(type, label, epsilon))
+        TypeWithSec(type, label, epsilon) =>
+            make_type(type_map, Type::TypeWithSec(type: type_map[type].element_type(type_map), label, epsilon))
         else => {
             eprintln("Invalid element type request for {}", this)
             abort()
@@ -900,8 +903,8 @@ fn unify(
                 yield Type::TypeWithSec(type: make_type(type_map, inner), label: label1, epsilon)
             }
             else => {
-                eprintln("Type mismatch between {} and {}", type1.render(&type_map), type2.render(&type_map))
-                abort()
+                let inner = unify(type_map, epsilon_context, type_map[ty1], type2)
+                yield Type::TypeWithSec(type: make_type(type_map, inner), label: label1, epsilon: epsilon1)
             }
         }
     }
@@ -987,9 +990,19 @@ fn merge_bounds(
                 abort()
             }
         }
-        List => {
-            eprintln("TODO: Implement list type merging")
-            return type1
+        List(type, size) => match type2 {
+            List(type: type2, size: size2) => {
+                if size != size2 {
+                    eprintln("List size mismatch between {} and {}", type1, type2)
+                    abort()
+                }
+                let inner = make_type(type_map, merge_bounds(type_map, epsilon_context, type_map[type], type_map[type2], op))
+                return Type::List(type: inner, size)
+            }
+            else => {
+                eprintln("Type mismatch between {} and {}", type1, type2)
+                abort()
+            }
         }
         Arrow => {
             eprintln("TODO: Implement arrow type merging")
@@ -1684,6 +1697,38 @@ fn interpret_eps(
             }
             return a_value! - b_value!
         }
+        Add(a, b) => {
+            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
+            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            if a_value is None or b_value is None {
+                return None
+            }
+            return a_value! + b_value!
+        }
+        Divide(a, b) => {
+            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
+            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            if a_value is None or b_value is None {
+                return None
+            }
+            return a_value! / b_value!
+        }
+        Min(a, b) => {
+            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
+            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            if a_value is None or b_value is None {
+                return None
+            }
+            return min(a_value!, b_value!)
+        }
+        Max(a, b) => {
+            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
+            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            if a_value is None or b_value is None {
+                return None
+            }
+            return max(a_value!, b_value!)
+        }
         else => None
 }
 
@@ -1777,10 +1822,15 @@ fn main(args: [String]) {
         for entry in checked.parameters {
             from.push(entry)
         }
-        let proc_type = make_type(&mut type_map, Type::Arrow(from, to: proc.return_type))
+        let proc_type = make_type(&mut type_map, Type::Arrow(from, to: checked.return_type))
         existing_procs.set(proc.name, proc_type)
         checked_procs.push(checked)
     }
+
+    for proc in checked_procs {
+        eprintln("{}", proc.to_lang(&type_map, indent: 0))
+    }
+    eprintln("main()")
 
     match type_map[existing_procs["main"]].pure_type(&type_map) {
         Arrow(to) => {
@@ -1794,7 +1844,7 @@ fn main(args: [String]) {
                 else => {}
             }
             if not type_map[to].pure_type(&type_map) is Int {
-                eprintln("Main function must return an integer")
+                eprintln("Main function must return an integer, not {}", type_map[to].pure_type(&type_map).render(&type_map))
                 return 1
             }
         }
@@ -1804,11 +1854,6 @@ fn main(args: [String]) {
         }
     }
 
-
-    for proc in checked_procs {
-        eprintln("{}", proc.to_lang(&type_map, indent: 0))
-    }
-    eprintln("main()")
 
     eprintln("{}", lattice.render())
 
@@ -1891,9 +1936,27 @@ fn codegen(
     println("    }}")
     println("}}")
 
+    println("Epsilon ediv(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() == 0 && b.index() == 0) {{")
+    println("        return get<double>(a) / get<double>(b);")
+    println("    }} else {{")
+    println("        cerr << \"Runtime epsilon variable\" << endl;")
+    println("        abort();")
+    println("    }}")
+    println("}}")
+
     println("Epsilon esub(Epsilon a, Epsilon b) {{")
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) - get<double>(b);")
+    println("    }} else {{")
+    println("        cerr << \"Runtime epsilon variable\" << endl;")
+    println("        abort();")
+    println("    }}")
+    println("}}")
+
+    println("Epsilon eadd(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() == 0 && b.index() == 0) {{")
+    println("        return get<double>(a) + get<double>(b);")
     println("    }} else {{")
     println("        cerr << \"Runtime epsilon variable\" << endl;")
     println("        abort();")
@@ -1964,7 +2027,9 @@ fn codegen(
         match epsilon {
             Fixed(value) => print("{:.5f}", value)
             Multiply(a, b) => print("emul(E{}, E{})", a.id, b.id)
+            Divide(a, b) => print("ediv(E{}, E{})", a.id, b.id)
             Subtract(a, b) => print("esub(E{}, E{})", a.id, b.id)
+            Add(a, b) => print("eadd(E{}, E{})", a.id, b.id)
             Max(a, b) => print("emax(E{}, E{})", a.id, b.id)
             Min(a, b) => print("emin(E{}, E{})", a.id, b.id)
             RuntimeVar(name) => print("evar(\"{}\")", name)
@@ -2607,6 +2672,7 @@ enum Token {
     Slash
     Star
     Then
+    Gt
 }
 
 fn todo() -> never {
@@ -2666,6 +2732,7 @@ struct Lexer {
                 b'+' => .consume(1, Token::Plus(index: .offset))
                 b'.' => .consume(1, Token::Dot(index: .offset))
                 b'=' => .consume(1, Token::Equal(index: .offset))
+                b'>' => .consume(1, Token::Gt(index: .offset))
                 else => {
                     eprintln("unexpected character in token stream: {:c} at offset {}", c, .offset)
                     throw Error::from_string_literal("unexpected character in token stream")
@@ -2757,33 +2824,17 @@ struct Parser {
                 guard lexer.next() is LParen else { throw Error::from_string_literal("expected '('") }
                 let expr = .parse(lexer)
                 if lexer.peek() is Comma { lexer.next() }
-                guard lexer.next() is Name(value: source_epsilon) else { throw Error::from_string_literal("expected source epsilon") }
+                let source_epsilon = .parse_epsilon(lexer)
                 if lexer.peek() is Comma { lexer.next() }
                 guard lexer.next() is Name(value: target_label) else { throw Error::from_string_literal("expected target label") }
                 if lexer.peek() is Comma { lexer.next() }
-                guard lexer.next() is Name(value: target_epsilon) else { throw Error::from_string_literal("expected target epsilon") }
+                let target_epsilon = .parse_epsilon(lexer)
                 guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
-                mut source_epsilon_id = .epsilon_name_map.get(source_epsilon)
-                mut target_epsilon_id = .epsilon_name_map.get(target_epsilon)
-
-                if source_epsilon_id is None {
-                    let id = EpsilonId(id: .epsilon_map.size() as! u64)
-                    .epsilon_name_map.set(source_epsilon, id)
-                    .epsilon_map.set(id, Epsilon::RuntimeVar(name: source_epsilon))
-                    source_epsilon_id = Some(id)
-                }
-                if target_epsilon_id is None {
-                    let id = EpsilonId(id: .epsilon_map.size() as! u64)
-                    .epsilon_name_map.set(target_epsilon, id)
-                    .epsilon_map.set(id, Epsilon::RuntimeVar(name: target_epsilon))
-                    target_epsilon_id = Some(id)
-                }
-
                 yield Expression::Declassify(
-                    expr: expr
-                    source_epsilon: source_epsilon_id!
+                    expr
+                    source_epsilon
                     target_label: Label(name: target_label)
-                    target_epsilon: target_epsilon_id!
+                    target_epsilon
                 )
             }
             Noise => {
@@ -2791,16 +2842,9 @@ struct Parser {
                 guard lexer.next() is LParen else { throw Error::from_string_literal("expected '('") }
                 let expr = .parse(lexer)
                 if lexer.peek() is Comma { lexer.next() }
-                guard lexer.next() is Name(value: epsilon) else { throw Error::from_string_literal("expected epsilon") }
+                let epsilon = .parse_epsilon(lexer)
                 guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
-                mut epsilon_id = .epsilon_name_map.get(epsilon)
-                if epsilon_id is None {
-                    let id = EpsilonId(id: .epsilon_map.size() as! u64)
-                    .epsilon_name_map.set(epsilon, id)
-                    .epsilon_map.set(id, Epsilon::RuntimeVar(name: epsilon))
-                    epsilon_id = Some(id)
-                }
-                return Expression::Noise(expr: expr, epsilon: epsilon_id!)
+                return Expression::Noise(expr: expr, epsilon)
             }
             LParen => {
                 let inner = .parse(lexer, comma_can_be_pair: true)
@@ -2961,7 +3005,7 @@ struct Parser {
                     }
                     base = Expression::Call(procedure: base, arguments)
                 }
-                Plus | Dash | Slash | Star => {
+                Plus | Dash | Slash | Star | Gt => {
                     let op = lexer.next()
                     let right = .parse(lexer)
                     base = Expression::Operation(op: match op {
@@ -2969,6 +3013,7 @@ struct Parser {
                         Dash => Operation::Sub
                         Slash => Operation::Div
                         Star => Operation::Mul
+                        Gt => Operation::Gt
                         else => {
                             abort()
                         }
@@ -3038,18 +3083,8 @@ struct Parser {
                         // lab{} eps{}
                         guard lexer.next() is Name(value) and value == "eps" else { throw Error::from_string_literal("expected 'eps'") }
                         guard lexer.next() is LBrace else { throw Error::from_string_literal("expected '{'") }
-                        guard lexer.next() is Name(value: epsilon) else { throw Error::from_string_literal("expected epsilon name") }
+                        let epsilon_id = .parse_epsilon(lexer)
                         guard lexer.next() is RBrace else { throw Error::from_string_literal("expected '}'") }
-
-                        let epsilon_id = match .epsilon_name_map.contains(epsilon) {
-                            true => .epsilon_name_map[epsilon]
-                            false => {
-                                let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
-                                .epsilon_map.set(epsilon_id, Epsilon::RuntimeVar(name: epsilon))
-                                .epsilon_name_map.set(epsilon, epsilon_id)
-                                yield epsilon_id
-                            }
-                        }
 
                         let type_id = TypeId(id: .type_map.size() as! u64)
                         .type_map.set(type_id, Type::TypeWithSec(type: base, label: Label(name: label), epsilon: epsilon_id))
@@ -3067,5 +3102,105 @@ struct Parser {
 
         // unreachable
         abort()
+    }
+
+    fn parse_epsilon(
+        mut this
+        lexer: &mut Lexer
+    ) throws -> EpsilonId {
+        // small embedded language for epsilon
+        // eps :: eps_term | eps_term * eps | eps_term / eps
+        // eps_term :: eps_base | eps_base + eps_term | eps_base - eps_term
+        // eps_base :: name | float | int | ( eps ) | 'min'(eps, eps) | 'max'(eps, eps)
+
+        mut initial = .parse_epsilon_term(lexer)
+        loop {
+            match lexer.peek() {
+                Star => {
+                    lexer.next()
+                    let right = .parse_epsilon(lexer)
+                    let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
+                    .epsilon_map.set(epsilon_id, Epsilon::Multiply(a: initial, b: right))
+                    initial = epsilon_id
+                }
+                Slash => {
+                    lexer.next()
+                    let right = .parse_epsilon(lexer)
+                    let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
+                    .epsilon_map.set(epsilon_id, Epsilon::Divide(a: initial, b: right))
+                    initial = epsilon_id
+                }
+                else => {
+                    return initial
+                }
+            }
+        }
+
+        // unreachable
+        abort()
+    }
+
+    fn parse_epsilon_term(
+        mut this
+        lexer: &mut Lexer
+    ) throws -> EpsilonId {
+        // eps_term :: eps_base | eps_base + eps_term | eps_base - eps_term
+        mut initial = .parse_epsilon_base(lexer)
+        loop {
+            match lexer.peek() {
+                Plus => {
+                    lexer.next()
+                    let right = .parse_epsilon(lexer)
+                    let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
+                    .epsilon_map.set(epsilon_id, Epsilon::Add(a: initial, b: right))
+                    initial = epsilon_id
+                }
+                Dash => {
+                    lexer.next()
+                    let right = .parse_epsilon(lexer)
+                    let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
+                    .epsilon_map.set(epsilon_id, Epsilon::Subtract(a: initial, b: right))
+                    initial = epsilon_id
+                }
+                else => {
+                    return initial
+                }
+            }
+        }
+
+        // unreachable
+        abort()
+    }
+
+    fn parse_epsilon_base(
+        mut this
+        lexer: &mut Lexer
+    ) throws -> EpsilonId {
+        // eps_base :: name | float | int | ( eps ) | 'min'(eps, eps) | 'max'(eps, eps)
+        match lexer.next() {
+            Name(value) => {
+                if .epsilon_name_map.contains(value) {
+                    return .epsilon_name_map[value]
+                }
+
+                let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
+                .epsilon_map.set(epsilon_id, Epsilon::RuntimeVar(name: value))
+                .epsilon_name_map.set(value, epsilon_id)
+                return epsilon_id
+            }
+            IntLiteral(value) => {
+                let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
+                .epsilon_map.set(epsilon_id, Epsilon::Fixed(value as! f64))
+                return epsilon_id
+            }
+            LParen => {
+                let inner = .parse_epsilon(lexer)
+                guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
+                return inner
+            }
+            else => {
+                throw Error::from_string_literal("expected epsilon base")
+            }
+        }
     }
 }

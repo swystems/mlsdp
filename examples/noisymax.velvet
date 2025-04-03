@@ -1,0 +1,6 @@
+let noisymax = proc(
+    xs: list int 10 lab{L1} eps{e1}
+) -> int lab{L2} eps{0} (foreach x in xs index i accum s = (0, 0) in
+    let score = declassify(x, e1/10, L2, e2/10) in
+        if score > s.0 then (score, x) else s).1
+in noisymax([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])

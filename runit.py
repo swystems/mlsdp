@@ -72,7 +72,7 @@ def main():
     CXX_COMPILER = args.cxx_compiler
     VELVET_COMPILER = args.velvet_compiler
 
-    for name in ["wavg", "noisymax"]:
+    for name in ["examples/noisymax.velvet"]:
         results = run(name)
         print("===", "Results for", name, "===")
         print("Expected:", results.expected)
