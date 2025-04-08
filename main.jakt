@@ -54,6 +54,17 @@ enum Epsilon {
     Add(a: EpsilonId, b: EpsilonId)
     Multiply(a: EpsilonId, b: EpsilonId)
     Divide(a: EpsilonId, b: EpsilonId)
+
+    fn render(this, anon context: &Context<EpsilonId, Epsilon>) -> String => match this {
+        Fixed(value) => format("{}", value)
+        RuntimeVar(name) => name
+        Min(a, b) => format("min(e{}, e{})", context.lookup(a).render(context), context.lookup(b).render(context))
+        Max(a, b) => format("max(e{}, e{})", context.lookup(a).render(context), context.lookup(b).render(context))
+        Subtract(a, b) => format("e{} - e{}", context.lookup(a).render(context), context.lookup(b).render(context))
+        Add(a, b) => format("e{} + e{}", context.lookup(a).render(context), context.lookup(b).render(context))
+        Multiply(a, b) => format("e{} * e{}", context.lookup(a).render(context), context.lookup(b).render(context))
+        Divide(a, b) => format("e{} / e{}", context.lookup(a).render(context), context.lookup(b).render(context))
+    }
 }
 
 struct Label implements(Equal<Label>, Hashable, FromStringLiteral) {
@@ -659,7 +670,7 @@ fn to_lang(this, type_map: &[TypeId: Type], indent: usize = 0) throws -> String 
             yield x
         }
         ForEach(var, index, accum, accum_init, list, body) => {
-            mut x = format("for {} in {} index {} accum {} = {}\n", var, list.to_lang(type_map), index, accum, accum_init.to_lang(type_map))
+            mut x = format("for {} in {} index {} accum {} = {} do\n", var, list.to_lang(type_map), index, accum, accum_init.to_lang(type_map))
             x += format("{: >{}}", "", indent + 2)
             x += body.to_lang(type_map, indent: indent + 2)
             yield x
@@ -1931,7 +1942,9 @@ fn codegen(
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) * get<double>(b);")
     println("    }} else {{")
-    println("        cerr << \"Runtime epsilon variable\" << endl;")
+    println("        if (a.index() == 1) return emul(evar(get<string>(a)), b);")
+    println("        if (b.index() == 1) return emul(a, evar(get<string>(b)));")
+    println("        cerr << \"Unexpected epsilon variant type\" << endl;")
     println("        abort();")
     println("    }}")
     println("}}")
@@ -1940,7 +1953,9 @@ fn codegen(
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) / get<double>(b);")
     println("    }} else {{")
-    println("        cerr << \"Runtime epsilon variable\" << endl;")
+    println("        if (a.index() == 1) return ediv(evar(get<string>(a)), b);")
+    println("        if (b.index() == 1) return ediv(a, evar(get<string>(b)));")
+    println("        cerr << \"Unexpected epsilon variant type\" << endl;")
     println("        abort();")
     println("    }}")
     println("}}")
@@ -1949,7 +1964,9 @@ fn codegen(
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) - get<double>(b);")
     println("    }} else {{")
-    println("        cerr << \"Runtime epsilon variable\" << endl;")
+    println("        if (a.index() == 1) return esub(evar(get<string>(a)), b);")
+    println("        if (b.index() == 1) return esub(a, evar(get<string>(b)));")
+    println("        cerr << \"Unexpected epsilon variant type\" << endl;")
     println("        abort();")
     println("    }}")
     println("}}")
@@ -1958,7 +1975,9 @@ fn codegen(
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) + get<double>(b);")
     println("    }} else {{")
-    println("        cerr << \"Runtime epsilon variable\" << endl;")
+    println("        if (a.index() == 1) return eadd(evar(get<string>(a)), b);")
+    println("        if (b.index() == 1) return eadd(a, evar(get<string>(b)));")
+    println("        cerr << \"Unexpected epsilon variant type\" << endl;")
     println("        abort();")
     println("    }}")
     println("}}")
@@ -1967,7 +1986,9 @@ fn codegen(
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return max(get<double>(a), get<double>(b));")
     println("    }} else {{")
-    println("        cerr << \"Runtime epsilon variable\" << endl;")
+    println("        if (a.index() == 1) return emax(evar(get<string>(a)), b);")
+    println("        if (b.index() == 1) return emax(a, evar(get<string>(b)));")
+    println("        cerr << \"Unexpected epsilon variant type\" << endl;")
     println("        abort();")
     println("    }}")
     println("}}")
@@ -1976,7 +1997,9 @@ fn codegen(
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return min(get<double>(a), get<double>(b));")
     println("    }} else {{")
-    println("        cerr << \"Runtime epsilon variable: \" << endl;")
+    println("        if (a.index() == 1) return emin(evar(get<string>(a)), b);")
+    println("        if (b.index() == 1) return emin(a, evar(get<string>(b)));")
+    println("        cerr << \"Unexpected epsilon variant type\" << endl;")
     println("        abort();")
     println("    }}")
     println("}}")
@@ -2306,7 +2329,7 @@ fn codegen(
 ///   xs : list int n lab { L1 } eps { e1 },
 ///   ys : list int n lab { L2 } eps { e2 },
 /// ) -> int lab { L2 } eps {0} {
-///   x = foreach v index i accum x = 0 in zip(xs, ys) {
+///   x = for v index i accum x = 0 in zip(xs, ys) do {
 ///     x + declassify (
 ///       // spend e1 /n declassifying xs[i]
 ///       v[0] , e1 / n,
@@ -2502,7 +2525,7 @@ fn make_test_program(
     }
     NoisyMax => {
         // let noisymax = proc(xs: list int 5 lab{L1} eps{e1}) -> int lab{L2} eps{e2}
-        //     (foreach x in xs index i accum s = (0, 0) in
+        //     (for x in xs index i accum s = (0, 0) do
         //         let score = declassify(x, e1/N, L2, e2/N) in
         //             if score > s.0 (score, x) else s).1
         let list_sens = new_sensitivity(1f64, sensitivity_context)
@@ -2633,7 +2656,7 @@ fn make_test_program(
     }
     CountGtV => {
         // let countgtv = proc(xs: list int 5 lab{L1} eps{e1}) -> int lab{L2} eps{e2}
-        //    (foreach x in xs index i accum s = 0 in
+        //    (for x in xs index i accum s = 0 do
         //        let score = declassify(x, e1/N, L2, e2/N) in
         //            if score > 42 s + 1 else s)
         let list_sens = new_sensitivity(1f64, sensitivity_context)
@@ -2649,6 +2672,7 @@ enum Token {
     Comma
     Dash
     Declassify
+    Do
     Dot
     Ecks // ×
     Else
@@ -2784,7 +2808,7 @@ struct Lexer {
 
         let name = value.to_string()
         return match name {
-            "foreach" => Token::Foreach(index)
+            "for" => Token::Foreach(index)
             "if" => Token::If(index)
             "else" => Token::Else(index)
             "then" => Token::Then(index)
@@ -2794,6 +2818,7 @@ struct Lexer {
             "×" => Token::Ecks(index)
             "declassify" => Token::Declassify(index)
             "noise" => Token::Noise(index)
+            "do" => Token::Do(index)
             else => Token::Name(index, value: name)
         }
     }
@@ -2915,7 +2940,7 @@ struct Parser {
                 }
             }
             Foreach => {
-                // foreach x in xs index i accum s = expr in
+                // for x in xs index i accum s = expr do
                 guard lexer.next() is Name(value: var) else { throw Error::from_string_literal("expected name") }
                 guard lexer.next() is In else { throw Error::from_string_literal("expected 'in'") }
                 let list = .parse(lexer)
@@ -2929,7 +2954,7 @@ struct Parser {
                 guard lexer.next() is Name(value: accum) else { throw Error::from_string_literal("expected name") }
                 guard lexer.next() is Equal else { throw Error::from_string_literal("expected '='") }
                 let accum_init = .parse(lexer)
-                guard lexer.next() is In else { throw Error::from_string_literal("expected 'in'") }
+                guard lexer.next() is Do else { throw Error::from_string_literal("expected 'in'") }
                 let body = .parse(lexer)
                 return Expression::ForEach(var, index, accum, accum_init, list, body)
             }
