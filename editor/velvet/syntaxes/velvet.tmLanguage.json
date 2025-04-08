@@ -1,0 +1,104 @@
+{
+	"$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+	"name": "Velvet",
+	"patterns": [
+		{
+			"include": "#keywords"
+		},
+		{
+			"include": "#strings"
+		},
+		{
+			"include": "#comments"
+		},
+		{
+			"include": "#numbers"
+		},
+		{
+			"include": "#operators"
+		},
+		{
+			"include": "#types"
+		},
+		{
+			"include": "#functions"
+		}
+	],
+	"repository": {
+		"keywords": {
+			"patterns": [{
+				"name": "keyword.control.velvet",
+				"match": "\\b(if|for|let|proc|in|noise|declassify|then|else|index|accum)\\b"
+			}]
+		},
+		"strings": {
+			"name": "string.quoted.double.velvet",
+			"begin": "\"",
+			"end": "\"",
+			"patterns": [
+				{
+					"name": "constant.character.escape.velvet",
+					"match": "\\\\."
+				}
+			]
+		},
+		"comments": {
+			"patterns": [
+				{
+					"name": "comment.line.double-slash.velvet",
+					"match": "//.*$"
+				},
+				{
+					"name": "comment.block.velvet",
+					"begin": "/\\*",
+					"end": "\\*/"
+				}
+			]
+		},
+		"numbers": {
+			"name": "constant.numeric.velvet",
+			"match": "-?\\b\\d+(\\.\\d+)?\\b"
+		},
+		"operators": {
+			"patterns": [
+				{
+					"name": "keyword.operator.arithmetic.velvet",
+					"match": "\\+|\\-|\\*|\\/|\\×|,"
+				},
+				{
+					"name": "keyword.operator.comparison.velvet",
+					"match": ">|<|==|!=|>=|<="
+				},
+				{
+					"name": "keyword.operator.assignment.velvet",
+					"match": "="
+				},
+				{
+					"name": "keyword.operator.arrow.velvet",
+					"match": "->"
+				}
+			]
+		},
+		"types": {
+			"patterns": [
+				{
+					"name": "storage.type.velvet",
+					"match": "\\b(int|list|lab|eps)\\b"
+				}
+			]
+		},
+		"functions": {
+			"patterns": [
+				{
+					"name": "entity.name.function.velvet",
+					"match": "\\b(min|max)\\b(?=\\s*\\()"
+				},
+				{
+					"name": "support.function.builtin.velvet",
+					"match": "\\b(noise|declassify)\\b(?=\\s*\\()"
+				}
+			]
+		}
+	},
+	"scopeName": "source.velvet"
+}

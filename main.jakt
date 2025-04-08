@@ -2006,7 +2006,7 @@ fn codegen(
     println("}}")
 
     println("Epsilon evar(string name) {{")
-    println("    return 50.0;")
+    println("    return 1.0;")
     println("}}")
     println()
 
@@ -2067,8 +2067,9 @@ fn codegen(
     println("#ifdef NO_NOISE")
     println("    return x;")
     println("#else")
+    println("    if (epsilon.index() != 0) epsilon = evar(get<string>(epsilon));")
     println("    if (epsilon.index() == 0) {{")
-    println("        double e = get<double>(epsilon);")
+    println("        double e = 1.0 / get<double>(epsilon);")
     println("        random_device rd;")
     println("        mt19937 gen(rd());")
     println("        uniform_real_distribution<double> dist(0.0, 1.0);")
@@ -2080,7 +2081,7 @@ fn codegen(
     println("        }}")
     println("    }} else {{")
     println("        string name = get<string>(epsilon);")
-    println("        cerr << \"Runtime epsilon variable: \" << name << endl;")
+    println("        cerr << \"Invalid runtime epsilon variable: \" << name << endl;")
     println("        abort();")
     println("    }}")
     println("#endif")

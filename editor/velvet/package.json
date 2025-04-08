@@ -1,0 +1,25 @@
+{
+  "name": "velvet",
+  "displayName": "velvet",
+  "description": "",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.99.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [{
+      "id": "velvet",
+      "aliases": ["Velvet", "velvet"],
+      "extensions": [".velvet"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "velvet",
+      "scopeName": "source.velvet",
+      "path": "./syntaxes/velvet.tmLanguage.json"
+    }]
+  }
+}
