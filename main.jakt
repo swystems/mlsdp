@@ -1938,6 +1938,7 @@ fn codegen(
 
     // e*(...)
     println("using Epsilon = variant<double, string>;")
+    println("Epsilon evar(string name);")
     println("Epsilon emul(Epsilon a, Epsilon b) {{")
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) * get<double>(b);")
@@ -3203,15 +3204,37 @@ struct Parser {
     ) throws -> EpsilonId {
         // eps_base :: name | float | int | ( eps ) | 'min'(eps, eps) | 'max'(eps, eps)
         match lexer.next() {
-            Name(value) => {
-                if .epsilon_name_map.contains(value) {
-                    return .epsilon_name_map[value]
+            Name(value) => match value {
+                "min" => {
+                    guard lexer.next() is LParen else { throw Error::from_string_literal("expected '('") }
+                    let left = .parse_epsilon(lexer)
+                    guard lexer.next() is Comma else { throw Error::from_string_literal("expected ','") }
+                    let right = .parse_epsilon(lexer)
+                    guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
+                    let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
+                    .epsilon_map.set(epsilon_id, Epsilon::Min(a: left, b: right))
+                    return epsilon_id
                 }
+                "max" => {
+                    guard lexer.next() is LParen else { throw Error::from_string_literal("expected '('") }
+                    let left = .parse_epsilon(lexer)
+                    guard lexer.next() is Comma else { throw Error::from_string_literal("expected ','") }
+                    let right = .parse_epsilon(lexer)
+                    guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
+                    let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
+                    .epsilon_map.set(epsilon_id, Epsilon::Max(a: left, b: right))
+                    return epsilon_id
+                }
+                else => {
+                    if .epsilon_name_map.contains(value) {
+                        return .epsilon_name_map[value]
+                    }
 
-                let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
-                .epsilon_map.set(epsilon_id, Epsilon::RuntimeVar(name: value))
-                .epsilon_name_map.set(value, epsilon_id)
-                return epsilon_id
+                    let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)
+                    .epsilon_map.set(epsilon_id, Epsilon::RuntimeVar(name: value))
+                    .epsilon_name_map.set(value, epsilon_id)
+                    return epsilon_id
+                }
             }
             IntLiteral(value) => {
                 let epsilon_id = EpsilonId(id: .epsilon_map.size() as! u64)

@@ -66,13 +66,17 @@ def main():
     parser.add_argument("--repeats", type=int, default=REPEATS)
     parser.add_argument("--cxx-compiler", type=str, default=CXX_COMPILER)
     parser.add_argument("--velvet-compiler", type=str, default=VELVET_COMPILER)
+    parser.add_argument("--test-case", action="append", default=[])
     args = parser.parse_args()
 
     REPEATS = args.repeats
     CXX_COMPILER = args.cxx_compiler
     VELVET_COMPILER = args.velvet_compiler
+    test_cases = args.test_case
+    if not test_cases:
+        test_cases = ["examples/noisymax.velvet"]
 
-    for name in ["examples/noisymax.velvet"]:
+    for name in test_cases:
         results = run(name)
         print("===", "Results for", name, "===")
         print("Expected:", results.expected)
