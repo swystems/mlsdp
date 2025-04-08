@@ -45,7 +45,7 @@ def run(name):
     compile(name, rerun=True)
     for _ in tqdm(range(REPEATS)):
         start_cr = time()
-        compile(name, rerun=True)
+        # compile(name, rerun=True)
         end_cr = time()
         compile_run_times.append(end_cr - start_cr)
         result = subprocess.run(["./out"])
