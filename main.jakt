@@ -670,7 +670,7 @@ fn to_lang(this, type_map: &[TypeId: Type], indent: usize = 0) throws -> String 
             yield x
         }
         ForEach(var, index, accum, accum_init, list, body) => {
-            mut x = format("for {} in {} index {} accum {} = {} do\n", var, list.to_lang(type_map), index, accum, accum_init.to_lang(type_map))
+            mut x = format("for {} in {} index {} accum {} = {}\n", var, list.to_lang(type_map), index, accum, accum_init.to_lang(type_map))
             x += format("{: >{}}", "", indent + 2)
             x += body.to_lang(type_map, indent: indent + 2)
             yield x
@@ -1687,60 +1687,76 @@ fn read_file(anon path: String?) throws -> [u8] {
     return file.read_all()
 }
 
-fn interpret_eps(
-    anon eps: Epsilon
+fn interpret_eps_raw(
+    anon eps: EpsilonId
     epsilon_context: &Context<EpsilonId, Epsilon>
-) -> f64? => match eps {
+    assume_runtime_vars: f64?
+    mut cache: [EpsilonId:f64?]
+) -> f64? => match epsilon_context.lookup(eps) {
         Fixed(value) => value
         Multiply(a, b) => {
-            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
-            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            let a_value = interpret_eps(a, epsilon_context, assume_runtime_vars, cache)
+            let b_value = interpret_eps(b, epsilon_context, assume_runtime_vars, cache)
             if a_value is None or b_value is None {
                 return None
             }
             return a_value! * b_value!
         }
         Subtract(a, b) => {
-            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
-            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            let a_value = interpret_eps(a, epsilon_context, assume_runtime_vars, cache)
+            let b_value = interpret_eps(b, epsilon_context, assume_runtime_vars, cache)
             if a_value is None or b_value is None {
                 return None
             }
             return a_value! - b_value!
         }
         Add(a, b) => {
-            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
-            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            let a_value = interpret_eps(a, epsilon_context, assume_runtime_vars, cache)
+            let b_value = interpret_eps(b, epsilon_context, assume_runtime_vars, cache)
             if a_value is None or b_value is None {
                 return None
             }
             return a_value! + b_value!
         }
         Divide(a, b) => {
-            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
-            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            let a_value = interpret_eps(a, epsilon_context, assume_runtime_vars, cache)
+            let b_value = interpret_eps(b, epsilon_context, assume_runtime_vars, cache)
             if a_value is None or b_value is None {
                 return None
             }
             return a_value! / b_value!
         }
         Min(a, b) => {
-            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
-            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            let a_value = interpret_eps(a, epsilon_context, assume_runtime_vars, cache)
+            let b_value = interpret_eps(b, epsilon_context, assume_runtime_vars, cache)
             if a_value is None or b_value is None {
                 return None
             }
             return min(a_value!, b_value!)
         }
         Max(a, b) => {
-            let a_value = interpret_eps(epsilon_context.lookup(a), epsilon_context)
-            let b_value = interpret_eps(epsilon_context.lookup(b), epsilon_context)
+            let a_value = interpret_eps(a, epsilon_context, assume_runtime_vars, cache)
+            let b_value = interpret_eps(b, epsilon_context, assume_runtime_vars, cache)
             if a_value is None or b_value is None {
                 return None
             }
             return max(a_value!, b_value!)
         }
-        else => None
+        RuntimeVar => assume_runtime_vars
+}
+
+fn interpret_eps(
+    anon eps: EpsilonId
+    epsilon_context: &Context<EpsilonId, Epsilon>
+    assume_runtime_vars: f64?
+    mut cache: [EpsilonId:f64?] = [:]
+) -> f64? {
+    mut result = cache.get(eps)
+    if not result.has_value() {
+        result = interpret_eps_raw(eps, epsilon_context, assume_runtime_vars, cache)
+    }
+    cache.set(eps, result!)
+    return result!
 }
 
 fn main(args: [String]) {
@@ -1847,7 +1863,7 @@ fn main(args: [String]) {
         Arrow(to) => {
             match type_map[to] {
                 TypeWithSec(type, label, epsilon) => {
-                    if (interpret_eps(epsilon_context.lookup(epsilon), &epsilon_context) ?? 1f64) != 0f64 {
+                    if interpret_eps(epsilon, &epsilon_context, assume_runtime_vars: 1f64)! != 0f64 {
                         eprintln("Main function may not yield a value with any available budget")
                         return 1
                     }
@@ -1932,20 +1948,18 @@ fn codegen(
     println("#include <random>")
     println("#include <cmath>")
     println("#include <iostream>")
+    println("#include <functional>")
     
     println("using namespace std;")
     println()
 
     // e*(...)
     println("using Epsilon = variant<double, string>;")
-    println("Epsilon evar(string name);")
     println("Epsilon emul(Epsilon a, Epsilon b) {{")
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) * get<double>(b);")
     println("    }} else {{")
-    println("        if (a.index() == 1) return emul(evar(get<string>(a)), b);")
-    println("        if (b.index() == 1) return emul(a, evar(get<string>(b)));")
-    println("        cerr << \"Unexpected epsilon variant type\" << endl;")
+    println("        cerr << \"Runtime epsilon variable\" << endl;")
     println("        abort();")
     println("    }}")
     println("}}")
@@ -1954,9 +1968,7 @@ fn codegen(
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) / get<double>(b);")
     println("    }} else {{")
-    println("        if (a.index() == 1) return ediv(evar(get<string>(a)), b);")
-    println("        if (b.index() == 1) return ediv(a, evar(get<string>(b)));")
-    println("        cerr << \"Unexpected epsilon variant type\" << endl;")
+    println("        cerr << \"Runtime epsilon variable\" << endl;")
     println("        abort();")
     println("    }}")
     println("}}")
@@ -1965,9 +1977,7 @@ fn codegen(
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) - get<double>(b);")
     println("    }} else {{")
-    println("        if (a.index() == 1) return esub(evar(get<string>(a)), b);")
-    println("        if (b.index() == 1) return esub(a, evar(get<string>(b)));")
-    println("        cerr << \"Unexpected epsilon variant type\" << endl;")
+    println("        cerr << \"Runtime epsilon variable\" << endl;")
     println("        abort();")
     println("    }}")
     println("}}")
@@ -1976,9 +1986,7 @@ fn codegen(
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) + get<double>(b);")
     println("    }} else {{")
-    println("        if (a.index() == 1) return eadd(evar(get<string>(a)), b);")
-    println("        if (b.index() == 1) return eadd(a, evar(get<string>(b)));")
-    println("        cerr << \"Unexpected epsilon variant type\" << endl;")
+    println("        cerr << \"Runtime epsilon variable\" << endl;")
     println("        abort();")
     println("    }}")
     println("}}")
@@ -1987,9 +1995,7 @@ fn codegen(
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return max(get<double>(a), get<double>(b));")
     println("    }} else {{")
-    println("        if (a.index() == 1) return emax(evar(get<string>(a)), b);")
-    println("        if (b.index() == 1) return emax(a, evar(get<string>(b)));")
-    println("        cerr << \"Unexpected epsilon variant type\" << endl;")
+    println("        cerr << \"Runtime epsilon variable\" << endl;")
     println("        abort();")
     println("    }}")
     println("}}")
@@ -2092,7 +2098,7 @@ fn codegen(
     println("T declassify(T x, Label source_label, Epsilon source, Label target_label, Epsilon target) {{")
     println("     for (auto path : paths) {{")
     println("         if (path->from == source_label && path->to == target_label) {{")
-    println("             return noise(x, esub(target, path->epsilon));")
+    println("             return noise(x, path->epsilon);")
     println("         }}")
     println("     }}")
     println("     abort();")
@@ -2837,6 +2843,7 @@ struct Parser {
     epsilon_name_map: [String:EpsilonId] = [:]
     epsilon_map: [EpsilonId:Epsilon]
     sensitivity_context: Context<SensitivityId, f64>
+    sensitivity_name_map: [String:SensitivityId] = [:]
 
     fn parse_base(
         mut this
@@ -3098,6 +3105,45 @@ struct Parser {
                     let right = .parse_type(lexer)
                     let type_id = TypeId(id: .type_map.size() as! u64)
                     .type_map.set(type_id, Type::Pair(left: base, right: right))
+                    base = type_id
+                }
+                Arrow => {
+                    lexer.next()
+                    mut sensitivity_name: String? = None
+                    mut sensitivity_multiplier: f64? = None
+                    if lexer.peek() is LBrace {
+                        lexer.next()
+                        if lexer.peek() is IntLiteral(value) {
+                            lexer.next()
+                            sensitivity_multiplier = value as! f64
+                            guard lexer.next() is Star else { throw Error::from_string_literal("expected '*'") }
+                        }
+
+                        guard lexer.next() is Name(value: name) else { throw Error::from_string_literal("expected label name") }
+                        guard lexer.next() is RBrace else { throw Error::from_string_literal("expected '}'") }
+                        sensitivity_name = name
+                    }
+                    mut froms: [(String, SensitivityMapped<TypeId>)] = []
+                    mut right = .parse_type(lexer)
+                    let base_rtype = .type_map[right]
+                    if base_rtype is Arrow(from, to) {
+                        froms.push_values(&from)
+                        right = to
+                    }
+                    mut sens: SensitivityId? = None
+                    if sensitivity_name.has_value() {
+                        if .sensitivity_name_map.contains(sensitivity_name!) {
+                            sens = .sensitivity_name_map[sensitivity_name!]
+                        } else {
+                            sens = new_sensitivity(sensitivity_multiplier ?? 1f64, sensitivity_context: &mut .sensitivity_context)
+                            .sensitivity_name_map.set(sensitivity_name!, sens!)
+                        }
+                    }
+
+                    let type_id = TypeId(id: .type_map.size() as! u64)
+                    let smbase = SensitivityMapped(value: base, sensitivity: sens)
+                    froms.push(("", smbase))
+                    .type_map.set(type_id, Type::Arrow(from: froms, to: right))
                     base = type_id
                 }
                 Name(value) => match value {
