@@ -246,7 +246,7 @@ class LabelLattice {
         for from in .all_labels() {
             for to in .all_labels() {
                 if from == to { continue }
-                if .best_path_for(from, to, epsilon: Epsilon::Max(a: epsilons[from], b: epsilons[to])) is Some(v) {
+                if .best_path_for(from, to, epsilon: epsilon_context.lookup(epsilons[from])) is Some(v) {
                     let (path, cost) = v
                     let id = EpsilonId(id: epsilon_context.map.size() as! u64)
                     epsilon_context.insert(id, Epsilon::Fixed(cost))
@@ -1179,13 +1179,17 @@ fn typecheck(
         Declassify(expr, source_epsilon, target_label, target_epsilon) => {
             let checked_expr = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
             let label = target_label
+            if label == type_map[checked_expr.type.value].label(lattice) {
+                eprintln("Invalid declassify: {} -> {}", type_map[checked_expr.type.value].label(lattice), label)
+                abort()
+            }
             guard lattice.best_path_for(
                 from: type_map[checked_expr.type.value].label(lattice)
                 to: label
                 epsilon: epsilon_context.lookup(target_epsilon)
             ) is Some(pc) else {
                 eprintln("Going from {} to {} is either not a declassify, or is not possible", type_map[checked_expr.type.value].label(lattice), label)
-                return checked_expr
+                abort()
             }
 
             let (path, cost) = pc
@@ -1955,7 +1959,10 @@ fn codegen(
 
     // e*(...)
     println("using Epsilon = variant<double, string>;")
+    println("Epsilon evar(string name);")
     println("Epsilon emul(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() != 0) a = evar(get<string>(a));")
+    println("    if (b.index() != 0) b = evar(get<string>(b));")
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) * get<double>(b);")
     println("    }} else {{")
@@ -1965,6 +1972,8 @@ fn codegen(
     println("}}")
 
     println("Epsilon ediv(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() != 0) a = evar(get<string>(a));")
+    println("    if (b.index() != 0) b = evar(get<string>(b));")
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) / get<double>(b);")
     println("    }} else {{")
@@ -1974,6 +1983,8 @@ fn codegen(
     println("}}")
 
     println("Epsilon esub(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() != 0) a = evar(get<string>(a));")
+    println("    if (b.index() != 0) b = evar(get<string>(b));")
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) - get<double>(b);")
     println("    }} else {{")
@@ -1983,6 +1994,8 @@ fn codegen(
     println("}}")
 
     println("Epsilon eadd(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() != 0) a = evar(get<string>(a));")
+    println("    if (b.index() != 0) b = evar(get<string>(b));")
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return get<double>(a) + get<double>(b);")
     println("    }} else {{")
@@ -1992,6 +2005,8 @@ fn codegen(
     println("}}")
 
     println("Epsilon emax(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() != 0) a = evar(get<string>(a));")
+    println("    if (b.index() != 0) b = evar(get<string>(b));")
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return max(get<double>(a), get<double>(b));")
     println("    }} else {{")
@@ -2001,11 +2016,11 @@ fn codegen(
     println("}}")
 
     println("Epsilon emin(Epsilon a, Epsilon b) {{")
+    println("    if (a.index() != 0) a = evar(get<string>(a));")
+    println("    if (b.index() != 0) b = evar(get<string>(b));")
     println("    if (a.index() == 0 && b.index() == 0) {{")
     println("        return min(get<double>(a), get<double>(b));")
     println("    }} else {{")
-    println("        if (a.index() == 1) return emin(evar(get<string>(a)), b);")
-    println("        if (b.index() == 1) return emin(a, evar(get<string>(b)));")
     println("        cerr << \"Unexpected epsilon variant type\" << endl;")
     println("        abort();")
     println("    }}")
