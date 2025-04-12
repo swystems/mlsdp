@@ -41,6 +41,53 @@ type Array implements(SetTheoric) {
     }
 }
 
+fn do_union(anon a: [usize], anon b: [usize]) -> [usize] {
+    mut seen: {usize} = {}
+    mut result: [usize] = []
+    for x in a {
+        if not seen.contains(x) {
+            seen.add(x)
+            result.push(x)
+        }
+    }
+    for x in b {
+        if not seen.contains(x) {
+            seen.add(x)
+            result.push(x)
+        }
+    }
+    return result
+}
+
+fn emit_machine_readable(
+    kind: String
+    message: String
+    anon positions: [usize]
+) {
+    mut builder = StringBuilder::create()
+    builder.append("{\"")
+    builder.append_escaped_for_json("kind")
+    builder.append("\": \"")
+    builder.append_escaped_for_json(kind)
+    builder.append("\", \"")
+    builder.append_escaped_for_json("message")
+    builder.append("\": \"")
+    builder.append_escaped_for_json(message)
+    builder.append("\", \"")
+    builder.append_escaped_for_json("positions")
+    builder.append("\": [")
+    mut first = true
+    for position in positions {
+        if not first { builder.append(", ") }
+        builder.appendff("{}", position)
+        first = false
+    }
+
+    builder.append("]}")
+    let json = builder.to_string()
+    println("{}", json)
+}
+
 struct SensitivityId { id: u64 }
 struct TypeId { id: u64 }
 struct EpsilonId { id: u64 }
@@ -309,6 +356,8 @@ enum InferredRange<T> {
 }
 
 boxed enum Type {
+    positions: [usize] = []
+
     Unchecked
     Int(InferredRange<i64>)
     Bool(InferredRange<bool>)
@@ -329,10 +378,17 @@ boxed enum Type {
 
     fn element_type(this, type_map: &mut [TypeId:Type]) -> TypeId => match this {
         List(type) => type
-        TypeWithSec(type, label, epsilon) =>
-            make_type(type_map, Type::TypeWithSec(type: type_map[type].element_type(type_map), label, epsilon))
+        TypeWithSec(type, label, epsilon) => {
+            let itype = type_map[type].element_type(type_map)
+            yield make_type(type_map, Type::TypeWithSec(positions: do_union(.positions, type_map[itype].positions), type: itype, label, epsilon))
+        }
         else => {
             eprintln("Invalid element type request for {}", this)
+            emit_machine_readable(
+                kind: "invalid_element_type_request"
+                message: format("Invalid element type request for '{}'", try .render(&type_map) catch { yield "???" })
+                positions: .positions
+            )
             abort()
         }
     }
@@ -393,6 +449,7 @@ enum Operation {
 }
 
 boxed enum Expression {
+    position: usize = 0
     type: SensitivityMapped<TypeId> = SensitivityMapped(value: unchecked(), sensitivity: None)
 
     IntLiteral(value: i64)
@@ -419,18 +476,18 @@ boxed enum Expression {
         }
 
         return match this {
-            IntLiteral(value) => Expression::IntLiteral(type: sens, value)
-            ListLiteral(elements) => Expression::ListLiteral(type: sens, elements)
-            Variable(name) => Expression::Variable(type: sens, name)
-            Noise(expr, epsilon) => Expression::Noise(type: sens, expr, epsilon)
-            Declassify(expr, source_epsilon, target_label, target_epsilon, used_epsilon) => Expression::Declassify(type: sens, expr, source_epsilon, target_label, target_epsilon, used_epsilon)
-            Subscript(expr, index) => Expression::Subscript(type: sens, expr, index)
-            Operation(op, operands) => Expression::Operation(type: sens, op, operands)
-            Call(procedure, arguments) => Expression::Call(type: sens, procedure, arguments)
-            ForEach(var, index, accum, accum_init, list, body) => Expression::ForEach(type: sens, var, index, accum, accum_init, list, body)
-            IfThenElse(condition, consequence, alternative) => Expression::IfThenElse(type: sens, condition, consequence, alternative)
-            Let(var, value, body) => Expression::Let(type: sens, var, value, body)
-            Ignore => Expression::Ignore
+            IntLiteral(position, value) => Expression::IntLiteral(position, type: sens, value)
+            ListLiteral(position, elements) => Expression::ListLiteral(position, type: sens, elements)
+            Variable(position, name) => Expression::Variable(position, type: sens, name)
+            Noise(position, expr, epsilon) => Expression::Noise(position, type: sens, expr, epsilon)
+            Declassify(position, expr, source_epsilon, target_label, target_epsilon, used_epsilon) => Expression::Declassify(position, type: sens, expr, source_epsilon, target_label, target_epsilon, used_epsilon)
+            Subscript(position, expr, index) => Expression::Subscript(position, type: sens, expr, index)
+            Operation(position, op, operands) => Expression::Operation(position, type: sens, op, operands)
+            Call(position, procedure, arguments) => Expression::Call(position, type: sens, procedure, arguments)
+            ForEach(position, var, index, accum, accum_init, list, body) => Expression::ForEach(position, type: sens, var, index, accum, accum_init, list, body)
+            IfThenElse(position, condition, consequence, alternative) => Expression::IfThenElse(position, type: sens, condition, consequence, alternative)
+            Let(position, var, value, body) => Expression::Let(position, type: sens, var, value, body)
+            Ignore => Expression::Ignore(position: .position)
         }
     }
 
@@ -451,18 +508,18 @@ boxed enum Expression {
         }
 
         return match this {
-            IntLiteral(value) => Expression::IntLiteral(type: sens, value)
-            ListLiteral(elements) => Expression::ListLiteral(type: sens, elements)
-            Variable(name) => Expression::Variable(type: sens, name)
-            Noise(expr, epsilon) => Expression::Noise(type: sens, expr, epsilon)
-            Declassify(expr, source_epsilon, target_label, target_epsilon) => Expression::Declassify(type: sens, expr, source_epsilon, target_label, target_epsilon)
-            Subscript(expr, index) => Expression::Subscript(type: sens, expr, index)
-            Operation(op, operands) => Expression::Operation(type: sens, op, operands)
-            Call(procedure, arguments) => Expression::Call(type: sens, procedure, arguments)
-            ForEach(var, index, accum, accum_init, list, body) => Expression::ForEach(type: sens, var, index, accum, accum_init, list, body)
-            IfThenElse(condition, consequence, alternative) => Expression::IfThenElse(type: sens, condition, consequence, alternative)
-            Let(var, value, body) => Expression::Let(type: sens, var, value, body)
-            Ignore => Expression::Ignore(type: sens)
+            IntLiteral(position, value) => Expression::IntLiteral(position, type: sens, value)
+            ListLiteral(position, elements) => Expression::ListLiteral(position, type: sens, elements)
+            Variable(position, name) => Expression::Variable(position, type: sens, name)
+            Noise(position, expr, epsilon) => Expression::Noise(position, type: sens, expr, epsilon)
+            Declassify(position, expr, source_epsilon, target_label, target_epsilon) => Expression::Declassify(position, type: sens, expr, source_epsilon, target_label, target_epsilon)
+            Subscript(position, expr, index) => Expression::Subscript(position, type: sens, expr, index)
+            Operation(position, op, operands) => Expression::Operation(position, type: sens, op, operands)
+            Call(position, procedure, arguments) => Expression::Call(position, type: sens, procedure, arguments)
+            ForEach(position, var, index, accum, accum_init, list, body) => Expression::ForEach(position, type: sens, var, index, accum, accum_init, list, body)
+            IfThenElse(position, condition, consequence, alternative) => Expression::IfThenElse(position, type: sens, condition, consequence, alternative)
+            Let(position, var, value, body) => Expression::Let(position, type: sens, var, value, body)
+            Ignore => Expression::Ignore(position: .position, type: sens)
         }
     }
 
@@ -618,81 +675,81 @@ boxed enum Expression {
         Ignore => format("{: >{}}ignore", "", indent)
     }
 
-fn to_lang(this, type_map: &[TypeId: Type], indent: usize = 0) throws -> String {
-    return match this {
-        IntLiteral(value) => format("{: >{}}{}", "", indent, value)
-        ListLiteral(elements) => {
-            mut x = format("{: >{}}[\n", "", indent)
-            for element in elements {
-                x += element.to_lang(type_map, indent: indent + 2)
-                x += ",\n"
+    fn to_lang(this, type_map: &[TypeId: Type], indent: usize = 0) throws -> String {
+        return match this {
+            IntLiteral(value) => format("{: >{}}{}", "", indent, value)
+            ListLiteral(elements) => {
+                mut x = format("{: >{}}[\n", "", indent)
+                for element in elements {
+                    x += element.to_lang(type_map, indent: indent + 2)
+                    x += ",\n"
+                }
+                x += format("{: >{}}]", "", indent)
+                yield x
             }
-            x += format("{: >{}}]", "", indent)
-            yield x
-        }
-        Variable(name) => name
-        Noise(expr, epsilon) => format("noise({}, {})", expr.to_lang(type_map), epsilon)
-        Declassify(
-            expr
-            source_epsilon
-            target_label
-            target_epsilon
-            used_epsilon
-        ) => format("declassify({}, {}, e{})", expr.to_lang(type_map), target_label.name, target_epsilon.id)
-        Subscript(expr, index) => format("{}[{}]", expr.to_lang(type_map), index.to_lang(type_map))
-        Operation(op, operands) => {
-            let op_value = match op {
-                Add => "+"
-                Sub => "-"
-                Mul => "*"
-                Div => "/"
-                Pair => ","
-                Gt => ">"
+            Variable(name) => name
+            Noise(expr, epsilon) => format("noise({}, {})", expr.to_lang(type_map), epsilon)
+            Declassify(
+                expr
+                source_epsilon
+                target_label
+                target_epsilon
+                used_epsilon
+            ) => format("declassify({}, {}, e{})", expr.to_lang(type_map), target_label.name, target_epsilon.id)
+            Subscript(expr, index) => format("{}[{}]", expr.to_lang(type_map), index.to_lang(type_map))
+            Operation(op, operands) => {
+                let op_value = match op {
+                    Add => "+"
+                    Sub => "-"
+                    Mul => "*"
+                    Div => "/"
+                    Pair => ","
+                    Gt => ">"
+                }
+                mut builder = StringBuilder::create()
+                builder.append("(")
+                mut first = true
+                for operand in operands {
+                    if not first { builder.appendff(" {} ", op_value) }
+                    builder.append(operand.to_lang(type_map))
+                    first = false
+                }
+                builder.append(")")
+                return builder.to_string()
             }
-            mut builder = StringBuilder::create()
-            builder.append("(")
-            mut first = true
-            for operand in operands {
-                if not first { builder.appendff(" {} ", op_value) }
-                builder.append(operand.to_lang(type_map))
-                first = false
+            Call(procedure, arguments) => {
+                mut x = procedure.to_lang(type_map)
+                for argument in arguments {
+                    x += argument.to_lang(type_map, indent: indent + 2)
+                    x += ",\n"
+                }
+                x += format("{: >{}})", "", indent)
+                yield x
             }
-            builder.append(")")
-            return builder.to_string()
-        }
-        Call(procedure, arguments) => {
-            mut x = procedure.to_lang(type_map)
-            for argument in arguments {
-                x += argument.to_lang(type_map, indent: indent + 2)
-                x += ",\n"
+            ForEach(var, index, accum, accum_init, list, body) => {
+                mut x = format("for {} in {} index {} accum {} = {}\n", var, list.to_lang(type_map), index, accum, accum_init.to_lang(type_map))
+                x += format("{: >{}}", "", indent + 2)
+                x += body.to_lang(type_map, indent: indent + 2)
+                yield x
             }
-            x += format("{: >{}})", "", indent)
-            yield x
+            IfThenElse(condition, consequence, alternative) => {
+                yield format(
+                    "if {} then {} else {}"
+                    condition.to_lang(type_map)
+                    consequence.to_lang(type_map)
+                    alternative.to_lang(type_map)
+                )
+            }
+            Let(var, value, body) => {
+                mut x = format("let {} = ", var)
+                x += value.to_lang(type_map, indent)
+                x += " in\n"
+                x += body.to_lang(type_map, indent: indent + 2)
+                yield x
+            }
+            Ignore => ""
         }
-        ForEach(var, index, accum, accum_init, list, body) => {
-            mut x = format("for {} in {} index {} accum {} = {}\n", var, list.to_lang(type_map), index, accum, accum_init.to_lang(type_map))
-            x += format("{: >{}}", "", indent + 2)
-            x += body.to_lang(type_map, indent: indent + 2)
-            yield x
-        }
-        IfThenElse(condition, consequence, alternative) => {
-            yield format(
-                "if {} then {} else {}"
-                condition.to_lang(type_map)
-                consequence.to_lang(type_map)
-                alternative.to_lang(type_map)
-            )
-        }
-        Let(var, value, body) => {
-            mut x = format("let {} = ", var)
-            x += value.to_lang(type_map, indent)
-            x += " in\n"
-            x += body.to_lang(type_map, indent: indent + 2)
-            yield x
-        }
-        Ignore => ""
     }
-}
 }
 
 struct Procedure {
@@ -729,11 +786,16 @@ class Context<K requires(Hashable), V> implements(IntoIterator<(K, V)>) {
     public map: [K:V]
     public base: Context<K, V>? = None
 
-    public fn lookup(this, anon key: K) -> V {
+    public fn lookup(this, anon key: K, anon at: [usize] = []) -> V {
         if not .map.contains(key) {
-            if .base is Some(base) { return base.lookup(key) }
+            if .base is Some(base) { return base.lookup(key, at) }
             eprintln("Key not found: '{}'", key)
             eprintln("  in context: {}", this)
+            emit_machine_readable(
+                kind: "key_not_found"
+                message: format("Key not found: '{}'", key)
+                positions: at
+            )
             abort()
         }
         return .map[key]
@@ -822,7 +884,7 @@ fn unify(
     return match type1 {
         Unchecked => type2
         Int(range1) => match type2 {
-            Int(range2) => Type::Int(match range1 {
+            Int(range2) => Type::Int(positions: do_union(type1.positions, type2.positions), match range1 {
                 Unknown => range1
                 Bounded(from: from1, to: to1) => match range2 {
                     Unknown => range2
@@ -831,11 +893,16 @@ fn unify(
             })
             else => {
                 eprintln("Type mismatch between {} and {}", type1, type2)
+                emit_machine_readable(
+                    kind: "type_mismatch"
+                    message: format("Type mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                    positions: do_union(type1.positions, type2.positions)
+                )
                 abort()
             }
         }
         Bool(range1) => match type2 {
-            Bool(range2) => Type::Bool(match range1 {
+            Bool(range2) => Type::Bool(positions: do_union(type1.positions, type2.positions), match range1 {
                 Unknown => range1
                 Bounded(from: from1, to: to1) => match range2 {
                     Unknown => range2
@@ -844,6 +911,11 @@ fn unify(
             })
             else => {
                 eprintln("Type mismatch between {} and {}", type1, type2)
+                emit_machine_readable(
+                    kind: "type_mismatch"
+                    message: format("Type mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                    positions: do_union(type1.positions, type2.positions)
+                )
                 abort()
             }
         }
@@ -853,24 +925,39 @@ fn unify(
                 let right_type = type_map[right]
                 let new_left = unify(type_map, epsilon_context, left_type, type_map[left2])
                 let new_right = unify(type_map, epsilon_context, right_type, type_map[right2])
-                yield Type::Pair(left: make_type(type_map, new_left), right: make_type(type_map, new_right))
+                yield Type::Pair(positions: do_union(left_type.positions, right_type.positions), left: make_type(type_map, new_left), right: make_type(type_map, new_right))
             }
             TypeWithSec => unify(type_map, epsilon_context, type2, type1)
             else => {
                 eprintln("Type mismatch between {} and {}", type1, type2)
+                emit_machine_readable(
+                    kind: "type_mismatch"
+                    message: format("Type mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                    positions: do_union(type1.positions, type2.positions)
+                )
                 abort()
             }
         }
         List(type, size) => {
-            if type2 is List(type: type2, size: size2) {
+            if type2 is List(type: ltype2, size: size2) {
                 if size != size2 {
-                    eprintln("List size mismatch between {} and {}", type1, type2)
+                    eprintln("List size mismatch between {} and {}", type1, ltype2)
+                    emit_machine_readable(
+                        kind: "list_size_mismatch"
+                        message: format("List size mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                        positions: do_union(type1.positions, type2.positions)
+                    )
                     abort()
                 }
-                let inner = make_type(type_map, unify(type_map, epsilon_context, type_map[type], type_map[type2]))
-                return Type::List(type: inner, size)
+                let inner = make_type(type_map, unify(type_map, epsilon_context, type_map[type], type_map[ltype2]))
+                return Type::List(positions: do_union(type1.positions, type2.positions), type: inner, size)
             } else {
                 eprintln("Type mismatch between {} and {}", type1, type2)
+                emit_machine_readable(
+                    kind: "type_mismatch"
+                    message: format("Type mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                    positions: do_union(type1.positions, type2.positions)
+                )
                 abort()
             }
         }
@@ -878,26 +965,41 @@ fn unify(
             Arrow(from: from2, to: to2) => {
                 mut inner_from: [(String, SensitivityMapped<TypeId>)] = []
                 mut i: usize = 0
-                for (name1, type1) in from1 {
+                for (name1, itype1) in from1 {
                     defer i += 1
                     if i >= from2.size() {
                         eprintln("Arrow parameter mismatch between {} and {}", type1, type2)
+                        emit_machine_readable(
+                            kind: "arrow_parameter_mismatch"
+                            message: format("Arrow parameter mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                            positions: do_union(type1.positions, type2.positions)
+                        )
                         abort()
                     }
-                    let (name2, type2) = from2[i]
+                    let (name2, itype2) = from2[i]
                     if name1 != name2 {
-                        eprintln("Arrow parameter name mismatch between {} and {}", type1, type2)
+                        eprintln("Arrow parameter name mismatch between {} and {}", name1, name2)
+                        emit_machine_readable(
+                            kind: "arrow_parameter_name_mismatch"
+                            message: format("Arrow parameter name mismatch between '{}' and '{}'", name1, name2)
+                            positions: do_union(type1.positions, type2.positions)
+                        )
                         abort()
                     }
 
-                    let inner_from1 = make_type(type_map, unify(type_map, epsilon_context, type_map[type1.value], type_map[type2.value]))
-                    inner_from.push((name1, SensitivityMapped(value: inner_from1, sensitivity: type1.sensitivity)))
+                    let inner_from1 = make_type(type_map, unify(type_map, epsilon_context, type_map[itype1.value], type_map[itype2.value]))
+                    inner_from.push((name1, SensitivityMapped(value: inner_from1, sensitivity: itype1.sensitivity)))
                 }
                 let inner_to = unify(type_map, epsilon_context, type_map[to1], type_map[to2])
-                yield Type::Arrow(from: inner_from, to: make_type(type_map, inner_to))
+                yield Type::Arrow(positions: do_union(type1.positions, type2.positions), from: inner_from, to: make_type(type_map, inner_to))
             }
             else => {
                 eprintln("Type mismatch between {} and {}", type1.render(&type_map), type2.render(&type_map))
+                emit_machine_readable(
+                    kind: "type_mismatch"
+                    message: format("Type mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                    positions: do_union(type1.positions, type2.positions)
+                )
                 abort()
             }
         }
@@ -906,16 +1008,21 @@ fn unify(
                 // TODO: Subtyping for these.
                 if label1 != label2 {
                     eprintln("Label mismatch between {} and {}", type1.render(&type_map), type2.render(&type_map))
+                    emit_machine_readable(
+                        kind: "label_mismatch"
+                        message: format("Label mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                        positions: do_union(type1.positions, type2.positions)
+                    )
                     abort()
                 }
                 let inner = unify(type_map, epsilon_context, type_map[ty1], type_map[ty2])
                 let epsilon = EpsilonId(id: epsilon_context.map.size() as! u64)
                 epsilon_context.insert(epsilon, Epsilon::Min(a: epsilon1, b: epsilon2))
-                yield Type::TypeWithSec(type: make_type(type_map, inner), label: label1, epsilon)
+                yield Type::TypeWithSec(positions: do_union(type1.positions, type2.positions), type: make_type(type_map, inner), label: label1, epsilon)
             }
             else => {
                 let inner = unify(type_map, epsilon_context, type_map[ty1], type2)
-                yield Type::TypeWithSec(type: make_type(type_map, inner), label: label1, epsilon: epsilon1)
+                yield Type::TypeWithSec(positions: do_union(type1.positions, type2.positions), type: make_type(type_map, inner), label: label1, epsilon: epsilon1)
             }
         }
     }
@@ -932,7 +1039,7 @@ fn merge_bounds(
     return match type1 {
         Unchecked => type2
         Int(range1) => match type2 {
-            Int(range2) => Type::Int(match range1 {
+            Int(range2) => Type::Int(positions: do_union(type1.positions, type2.positions), match range1 {
                 Unknown => range1
                 Bounded(from: from1, to: to1) => match range2 {
                     Unknown => range2
@@ -950,6 +1057,11 @@ fn merge_bounds(
                         }
                         Pair => {
                             eprintln("Invalid operation for int: Pair")
+                            emit_machine_readable(
+                                kind: "invalid_operation"
+                                message: format("Invalid operation for int: Pair")
+                                positions: do_union(type1.positions, type2.positions)
+                            )
                             abort()
                         }
                     }
@@ -957,11 +1069,16 @@ fn merge_bounds(
             })
             else => {
                 eprintln("Type mismatch between {} and {}", type1, type2)
+                emit_machine_readable(
+                    kind: "type_mismatch"
+                    message: format("Type mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                    positions: do_union(type1.positions, type2.positions)
+                )
                 abort()
             }
         }
         Bool(range1) => match type2 {
-            Bool(range2) => Type::Bool(match range1 {
+            Bool(range2) => Type::Bool(positions: do_union(type1.positions, type2.positions), match range1 {
                 Unknown => range1
                 Bounded(from: from1, to: to1) => match range2 {
                     Unknown => range2
@@ -973,10 +1090,20 @@ fn merge_bounds(
                         Div => InferredRange::Bounded(from: from1 and not to2, to: to1 and not from2)
                         Gt => {
                             eprintln("Invalid operation for bool: Gt")
+                            emit_machine_readable(
+                                kind: "invalid_operation"
+                                message: format("Invalid operation for bool: Gt")
+                                positions: do_union(type1.positions, type2.positions)
+                            )
                             abort()
                         }
                         Pair => {
-                            eprintln("Invalid operation for int: Pair")
+                            eprintln("Invalid operation for bool: Pair")
+                            emit_machine_readable(
+                                kind: "invalid_operation"
+                                message: format("Invalid operation for bool: Pair")
+                                positions: do_union(type1.positions, type2.positions)
+                            )
                             abort()
                         }
                     }
@@ -984,7 +1111,12 @@ fn merge_bounds(
             })
             else => {
                 eprintln("Type mismatch between {} and {}", type1, type2)
-                throw Error::from_string_literal("type mismatch")
+                emit_machine_readable(
+                    kind: "type_mismatch"
+                    message: format("Type mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                    positions: do_union(type1.positions, type2.positions)
+                )
+                abort()
             }
         }
         Pair(left, right) => match type2 {
@@ -993,25 +1125,40 @@ fn merge_bounds(
                 let right_type = type_map[right]
                 let new_left = merge_bounds(type_map, epsilon_context, left_type, type_map[left2], op)
                 let new_right = merge_bounds(type_map, epsilon_context, right_type, type_map[right2], op)
-                yield Type::Pair(left: make_type(type_map, new_left), right: make_type(type_map, new_right))
+                yield Type::Pair(positions: do_union(type1.positions, type2.positions), left: make_type(type_map, new_left), right: make_type(type_map, new_right))
             }
             TypeWithSec => merge_bounds(type_map, epsilon_context, type2, type1, op)
             else => {
                 eprintln("Type mismatch between {} and {}", type1, type2)
+                emit_machine_readable(
+                    kind: "type_mismatch"
+                    message: format("Type mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                    positions: do_union(type1.positions, type2.positions)
+                )
                 abort()
             }
         }
-        List(type, size) => match type2 {
-            List(type: type2, size: size2) => {
+        List(type: itype, size) => match type2 {
+            List(type: itype2, size: size2) => {
                 if size != size2 {
                     eprintln("List size mismatch between {} and {}", type1, type2)
+                    emit_machine_readable(
+                        kind: "list_size_mismatch"
+                        message: format("List size mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                        positions: do_union(type1.positions, type2.positions)
+                    )
                     abort()
                 }
-                let inner = make_type(type_map, merge_bounds(type_map, epsilon_context, type_map[type], type_map[type2], op))
-                return Type::List(type: inner, size)
+                let inner = make_type(type_map, merge_bounds(type_map, epsilon_context, type_map[itype], type_map[itype2], op))
+                return Type::List(positions: do_union(type1.positions, type2.positions), type: inner, size)
             }
             else => {
                 eprintln("Type mismatch between {} and {}", type1, type2)
+                emit_machine_readable(
+                    kind: "type_mismatch"
+                    message: format("Type mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                    positions: do_union(type1.positions, type2.positions)
+                )
                 abort()
             }
         }
@@ -1023,16 +1170,21 @@ fn merge_bounds(
             TypeWithSec(type: ty2, label: label2, epsilon: epsilon2) => {
                 if label1 != label2 {
                     eprintln("Label mismatch between {} and {}", type1.render(&type_map), type2.render(&type_map))
+                    emit_machine_readable(
+                        kind: "label_mismatch"
+                        message: format("Label mismatch between '{}' and '{}'", type1.render(&type_map), type2.render(&type_map))
+                        positions: do_union(type1.positions, type2.positions)
+                    )
                     return type2
                 }
                 let inner = merge_bounds(type_map, epsilon_context, type_map[ty1], type_map[ty2], op)
                 let epsilon = EpsilonId(id: epsilon_context.map.size() as! u64)
                 epsilon_context.insert(epsilon, Epsilon::Max(a: epsilon1, b: epsilon2))
-                yield Type::TypeWithSec(type: make_type(type_map, inner), label: label1, epsilon)
+                yield Type::TypeWithSec(positions: do_union(type1.positions, type2.positions), type: make_type(type_map, inner), label: label1, epsilon)
             }
             else => {
                 let inner = merge_bounds(type_map, epsilon_context, type_map[ty1], type2, op)
-                yield Type::TypeWithSec(type: make_type(type_map, inner), label: label1, epsilon: epsilon1)
+                yield Type::TypeWithSec(positions: do_union(type1.positions, type2.positions), type: make_type(type_map, inner), label: label1, epsilon: epsilon1)
             }
         }
     }
@@ -1077,8 +1229,8 @@ fn sens_merge(
     let s1 = sens1!
     let s2 = sens2!
 
-    let value1 = sensitivity_context.lookup(s1)
-    let value2 = sensitivity_context.lookup(s2)
+    let value1 = sensitivity_context.lookup(s1, at: lhs.positions)
+    let value2 = sensitivity_context.lookup(s2, at: rhs.positions)
 
     guard max_difference_for(&lhs, &type_map) is Some(lhs_max_diff)
         and max_difference_for(&rhs, &type_map) is Some(rhs_max_diff)
@@ -1107,7 +1259,7 @@ fn typecheck(
     let retv = fn[
         &lattice, &mut type_map, &mut type_context, &mut type_level_sensitivity_context, &mut epsilon_context, &mut sensitivity_context, &mut expr
     ]() throws => match expr {
-        IntLiteral(value) => expr.with_type(make_type(&mut type_map, Type::Int(InferredRange::Bounded(from: value, to: value))))
+        IntLiteral(value) => expr.with_type(make_type(&mut type_map, Type::Int(positions: [expr.position], InferredRange::Bounded(from: value, to: value))))
         ListLiteral(elements) => {
             mut element_type: TypeId? = None
             mut checked_elements: [Expression] = []
@@ -1120,16 +1272,22 @@ fn typecheck(
                     element_type = make_type(&mut type_map, unify(type_map, epsilon_context, type_map[element_type!], type_map[checked_element.type.value]))
                 }
             }
+            let positions = elements.map(&fn(anon e: &Expression) throws -> usize => e.position)
             if element_type is None {
                 eprintln("Could not determine element type for list, defaulting to unchecked")
-                element_type = make_type(&mut type_map, Type::Unchecked)
+                emit_machine_readable(
+                    kind: "warning"
+                    message: "Could not determine element type for list, defaulting to unchecked"
+                    positions
+                )
+                element_type = make_type(&mut type_map, Type::Unchecked(positions))
             }
 
-            let type = make_type(type_map, Type::List(type: element_type!, size: elements.size()))
-            yield Expression::ListLiteral(elements: checked_elements).with_type(type)
+            let type = make_type(type_map, Type::List(positions, type: element_type!, size: elements.size()))
+            yield Expression::ListLiteral(position: expr.position, elements: checked_elements).with_type(type)
         }
         Variable(name) => {
-            let type = type_context.lookup(name)
+            let type = type_context.lookup(name, at: [expr.position])
             yield expr.with_type(
                 type
                 sensitivity: type_level_sensitivity_context.find(type)
@@ -1139,15 +1297,18 @@ fn typecheck(
             let checked_expr = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, expr)
             let checked_index = typecheck(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, index)
             mut expr_type = type_map[checked_expr.type.value]
-            let unchecked_expr = Expression::Subscript(expr: checked_expr, index: checked_index)
+            let unchecked_expr = Expression::Subscript(position: checked_expr.position, expr: checked_expr, index: checked_index)
             mut wrap_with_sec = fn(anon type: TypeId) throws => type
+
+            let positions = [checked_expr.position, checked_index.position]
 
             if expr_type is TypeWithSec(type, label, epsilon) {
                 wrap_with_sec = fn[
                     &mut type_map
                     label
                     epsilon
-                ](anon type: TypeId) throws -> TypeId => make_type(type_map, Type::TypeWithSec(type, label, epsilon))
+                    positions
+                ](anon type: TypeId) throws -> TypeId => make_type(type_map, Type::TypeWithSec(positions, type, label, epsilon))
                 expr_type = type_map[type]
             }
 
@@ -1159,17 +1320,32 @@ fn typecheck(
                         1 => unchecked_expr.with_type(wrap_with_sec(right))
                         else => {
                             eprintln("Invalid index for pair: {}", value)
+                            emit_machine_readable(
+                                kind: "error"
+                                message: "Invalid index for pair"
+                                positions: [checked_index.position]
+                            )
                             abort()
                         }
                     }
                     else => {
                         eprintln("Invalid index type for pair: {}", checked_index)
+                        emit_machine_readable(
+                            kind: "error"
+                            message: "Invalid index type for pair"
+                            positions: [checked_index.position]
+                        )
                         abort()
                     }
                 }
                 else => {
                     eprintln("Invalid subscript type: {}", expr_type)
                     eprintln("  on expression: {}", checked_expr.to_lang(&type_map))
+                    emit_machine_readable(
+                        kind: "error"
+                        message: format("Invalid subscript type '{}'", expr_type.render(&type_map))
+                        positions: [checked_expr.position]
+                    )
                     abort()
                 }
             }
@@ -1181,21 +1357,31 @@ fn typecheck(
             let label = target_label
             if label == type_map[checked_expr.type.value].label(lattice) {
                 eprintln("Invalid declassify: {} -> {}", type_map[checked_expr.type.value].label(lattice), label)
+                emit_machine_readable(
+                    kind: "error"
+                    message: format("Invalid declassify: {} -> {}", type_map[checked_expr.type.value].label(lattice), label)
+                    positions: [checked_expr.position]
+                )
                 abort()
             }
             guard lattice.best_path_for(
                 from: type_map[checked_expr.type.value].label(lattice)
                 to: label
-                epsilon: epsilon_context.lookup(target_epsilon)
+                epsilon: epsilon_context.lookup(target_epsilon, at: [checked_expr.position])
             ) is Some(pc) else {
                 eprintln("Going from {} to {} is either not a declassify, or is not possible", type_map[checked_expr.type.value].label(lattice), label)
+                emit_machine_readable(
+                    kind: "error"
+                    message: format("Going from {} to {} is either not a declassify, or is not possible", type_map[checked_expr.type.value].label(lattice), label)
+                    positions: [checked_expr.position]
+                )
                 abort()
             }
 
             let (path, cost) = pc
 
             eprintln("Path from {} to {}: {} (cost = {})", type_map[checked_expr.type.value].label(lattice), label, path, cost)
-            let type = make_type(type_map, Type::TypeWithSec(type: checked_expr.type.value, label, epsilon: target_epsilon))
+            let type = make_type(type_map, Type::TypeWithSec(positions: [checked_expr.position], type: checked_expr.type.value, label, epsilon: target_epsilon))
             let used_eps_id = EpsilonId(id: epsilon_context.map.size() as! u64)
             let used_eps_multiplier_id = EpsilonId(id: (epsilon_context.map.size() + 1) as! u64)
             epsilon_context.insert(used_eps_id, Epsilon::Multiply(a: source_epsilon, b: used_eps_multiplier_id))
@@ -1204,6 +1390,7 @@ fn typecheck(
             
 
             yield Expression::Declassify(
+                position: checked_expr.position
                 expr: checked_expr
                 source_epsilon
                 target_label: label
@@ -1231,8 +1418,8 @@ fn typecheck(
             let epsilon2 = type_map[checked_expr.type.value].epsilon(&type_map)
             let new_epsilon = EpsilonId(id: epsilon_context.map.size() as! u64)
             epsilon_context.insert(new_epsilon, Epsilon::Subtract(a: epsilon, b: epsilon2))
-            let new_type = make_type(type_map, Type::TypeWithSec(type: checked_expr.type.value, label: expr_type.label(lattice), epsilon: new_epsilon))
-            yield Expression::Noise(expr: checked_expr, epsilon).with_type(
+            let new_type = make_type(type_map, Type::TypeWithSec(positions: [checked_expr.position], type: checked_expr.type.value, label: expr_type.label(lattice), epsilon: new_epsilon))
+            yield Expression::Noise(position: checked_expr.position, expr: checked_expr, epsilon).with_type(
                 new_type
                 sensitivity: checked_expr.type.sensitivity
                 sensitivity_multiplier: checked_expr.type.sensitivity_multiplier
@@ -1257,6 +1444,11 @@ fn typecheck(
                 Pair => {
                     if checked_operands.size() != 2 {
                         eprintln("Pair operation requires exactly 2 operands")
+                        emit_machine_readable(
+                            kind: "error"
+                            message: format("Pair operation requires exactly 2 operands, {} provided", checked_operands.size())
+                            positions: [expr.position]
+                        )
                         abort()
                     }
 
@@ -1274,7 +1466,7 @@ fn typecheck(
                         type_map[left]
                         type_map[right]
                     )
-                    let type = make_type(type_map, Type::Pair(left, right))
+                    let type = make_type(type_map, Type::Pair(positions: do_union(type_map[left].positions, type_map[right].positions), left, right))
                     yield SensitivityMapped(value: type, sensitivity: sens)
                 }
                 else => fold(
@@ -1301,7 +1493,7 @@ fn typecheck(
                             unify(type_map, epsilon_context, merged_bounds_acc, x_type)
                         )
                         let local_sensitivity = match x.0.sensitivity.has_value() {
-                            true => x.1.lookup(x.0.sensitivity!)
+                            true => x.1.lookup(x.0.sensitivity!, at: type_map[x.0.value].positions),
                             false => 0f64
                         }
                         let sensitivity = sens_merge(
@@ -1323,7 +1515,7 @@ fn typecheck(
                 ).0
             }
 
-            yield Expression::Operation(type, op, operands: checked_operands.map(&fn(anon x: &(Expression, Context<SensitivityId, f64>)) throws => x.0))
+            yield Expression::Operation(position: expr.position, type, op, operands: checked_operands.map(&fn(anon x: &(Expression, Context<SensitivityId, f64>)) throws => x.0))
         }
         Call(procedure, arguments) => {
             let checked_procedure = typecheck(
@@ -1354,6 +1546,11 @@ fn typecheck(
             let raw_proc_type = procedure_type.pure_type(&type_map)
             guard raw_proc_type is Arrow(from: from_types, to: to_type) else {
                 eprintln("Invalid procedure type: {}", procedure_type.render(&type_map))
+                emit_machine_readable(
+                    kind: "error"
+                    message: format("Invalid procedure type: '{}'", procedure_type.render(&type_map))
+                    positions: [procedure.position]
+                )
                 abort()
             }
 
@@ -1374,7 +1571,7 @@ fn typecheck(
                 operands.push(argument)
             }
 
-            yield Expression::Call(procedure: checked_procedure, arguments: operands).with_type(
+            yield Expression::Call(position: checked_procedure.position, procedure: checked_procedure, arguments: operands).with_type(
                 type
                 sensitivity: return_sens
             )
@@ -1406,14 +1603,14 @@ fn typecheck(
             let entry_var_type = list_type.element_type(&mut type_map)
             mut new_type_context = child_context(*type_context)
             new_type_context.insert(var, match type_map[entry_var_type] {
-                TypeWithSec(type, label, epsilon) => {
+                TypeWithSec(positions, type, label, epsilon) => {
                     let div_eps = EpsilonId(id: epsilon_context.map.size() as! u64)
                     epsilon_context.insert(div_eps, Epsilon::Fixed(1f64 / list_type.element_count(&type_map) as! f64))
                     let split_eps = EpsilonId(id: epsilon_context.map.size() as! u64)
                     epsilon_context.insert(split_eps, Epsilon::Multiply(a: epsilon, b: div_eps))
                     yield make_type(
                         &mut type_map
-                        Type::TypeWithSec(type, label, epsilon: split_eps)
+                        Type::TypeWithSec(positions, type, label, epsilon: split_eps)
                     )
                 }
                 else => entry_var_type
@@ -1423,7 +1620,7 @@ fn typecheck(
             new_type_sensitivity_context.map.set(entry_var_type, entry_var_sens)
             let index_var_type = make_type(
                 &mut type_map
-                Type::Int(InferredRange::Bounded(from: 0i64, to: list_type.element_count(&type_map) as! i64 - 1i64))
+                Type::Int(positions: [expr.position], InferredRange::Bounded(from: 0i64, to: list_type.element_count(&type_map) as! i64 - 1i64))
             )
             new_type_context.insert(index, index_var_type)
             let index_var_sens = SensitivityId(id: sensitivity_context.map.size() as! u64)
@@ -1477,7 +1674,7 @@ fn typecheck(
                 loop_sensitivity_multiplier = total_sensitivity_multiplier as! f64
             }
 
-            yield Expression::ForEach(var, index, accum, accum_init: accum_init_expr, list: list_expr, body: body_stmt).with_type(
+            yield Expression::ForEach(position: expr.position, var, index, accum, accum_init: accum_init_expr, list: list_expr, body: body_stmt).with_type(
                 type: accum_var_type
                 sensitivity: loop_sensitivity
                 sensitivity_multiplier: loop_sensitivity_multiplier
@@ -1505,11 +1702,11 @@ fn typecheck(
             let new_sens_multiplier = match new_sens.has_value() {
                 true => {
                     type_level_sensitivity_context.insert(new_type, new_sens!)
-                    yield sensitivity_context.lookup(new_sens!)
+                    yield sensitivity_context.lookup(new_sens!, at: [checked_condition.position])
                 }
                 false => 1f64
             }
-            yield Expression::IfThenElse(condition: checked_condition, consequence: checked_consequence, alternative: checked_alternative).with_type(
+            yield Expression::IfThenElse(position: expr.position, condition: checked_condition, consequence: checked_consequence, alternative: checked_alternative).with_type(
                 type: new_type
                 sensitivity: new_sens
                 sensitivity_multiplier: new_sens_multiplier
@@ -1546,7 +1743,7 @@ fn typecheck(
                         true => {
                             type_level_sensitivity_context.insert(type, new_sens!)
                             eprintln(" -- Letting {} with sens {}", var, new_sens!)
-                            yield sensitivity_context.lookup(new_sens!)
+                            yield sensitivity_context.lookup(new_sens!, at: [checked_value.position])
                         }
                         false => 1f64
                     }
@@ -1560,7 +1757,7 @@ fn typecheck(
                         body
                     )
                     
-                    yield Expression::Let(var, value: checked_value, body: checked_body).with_type(
+                    yield Expression::Let(position: expr.position, var, value: checked_value, body: checked_body).with_type(
                         type: checked_body.type.value
                         sensitivity: new_sens
                         sensitivity_multiplier: new_sens_multiplier
@@ -1579,7 +1776,7 @@ fn typecheck(
                         body
                     )
 
-                    yield Expression::Let(var, value: checked_value, body: checked_body).with_type(
+                    yield Expression::Let(position: expr.position, var, value: checked_value, body: checked_body).with_type(
                         type: checked_body.type.value
                         sensitivity: checked_value.type.sensitivity
                         sensitivity_multiplier: checked_value.type.sensitivity_multiplier
@@ -1665,12 +1862,12 @@ fn typecheck(
 
     if (
         body_sens.has_value() and return_sens.has_value()
-        ) and sensitivity_context.lookup(body_sens!) * body_sens_multiplier > sensitivity_context.lookup(return_sens!) {
+        ) and sensitivity_context.lookup(body_sens!, at: [checked_body.position]) * body_sens_multiplier > sensitivity_context.lookup(return_sens!, at: [checked_body.position]) {
         eprintln(
             "Body sensitivity {} * {} > Return sensitivity {}"
-            sensitivity_context.lookup(body_sens!)
+            sensitivity_context.lookup(body_sens!, at: [checked_body.position])
             body_sens_multiplier
-            sensitivity_context.lookup(return_sens!)
+            sensitivity_context.lookup(return_sens!, at: [checked_body.position])
         )
         eprintln("Body: {}", checked_body.to_tree(&type_map))
     }
@@ -1798,6 +1995,11 @@ fn main(args: [String]) {
     let main_contents = try parser.parse(&mut lexer) catch err {
         eprintln("Error: {}", err)
         eprintln("At offset: {}", lexer.offset)
+        emit_machine_readable(
+            kind: "parse_error"
+            message: format("{}", err)
+            positions: [lexer.offset]
+        )
         return 1
     }
 
@@ -2782,6 +2984,11 @@ struct Lexer {
                 b'>' => .consume(1, Token::Gt(index: .offset))
                 else => {
                     eprintln("unexpected character in token stream: {:c} at offset {}", c, .offset)
+                    emit_machine_readable(
+                        kind: "lex_error",
+                        message: format("unexpected character in token stream: {:c}", c)
+                        positions: [.offset]
+                    )
                     throw Error::from_string_literal("unexpected character in token stream")
                 }
             }
@@ -2866,8 +3073,8 @@ struct Parser {
     ) throws -> Expression {
         let initial = lexer.peek()
         return match lexer.next() {
-            IntLiteral(value) => Expression::IntLiteral(value)
-            Name(value) => Expression::Variable(name: value)
+            IntLiteral(index, value) => Expression::IntLiteral(position: index, value)
+            Name(index, value) => Expression::Variable(position: index, name: value)
             Declassify => {
                 // declassify(expr, source_epsilon, target_label, target_epsilon)
                 guard lexer.next() is LParen else { throw Error::from_string_literal("expected '('") }
@@ -2880,6 +3087,7 @@ struct Parser {
                 let target_epsilon = .parse_epsilon(lexer)
                 guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
                 yield Expression::Declassify(
+                    position: initial.index
                     expr
                     source_epsilon
                     target_label: Label(name: target_label)
@@ -2893,7 +3101,7 @@ struct Parser {
                 if lexer.peek() is Comma { lexer.next() }
                 let epsilon = .parse_epsilon(lexer)
                 guard lexer.next() is RParen else { throw Error::from_string_literal("expected ')'") }
-                return Expression::Noise(expr: expr, epsilon)
+                return Expression::Noise(position: initial.index, expr: expr, epsilon)
             }
             LParen => {
                 let inner = .parse(lexer, comma_can_be_pair: true)
@@ -2918,7 +3126,7 @@ struct Parser {
                         }
                     }
                 }
-                return Expression::ListLiteral(elements)
+                return Expression::ListLiteral(position: initial.index, elements)
             }
             Let => {
                 guard lexer.next() is Name(value: var) else { throw Error::from_string_literal("expected name") }
@@ -2959,7 +3167,7 @@ struct Parser {
                         let value = .parse(lexer)
                         guard lexer.next() is In else { throw Error::from_string_literal("expected 'in'") }
                         let body = .parse(lexer)
-                        return Expression::Let(var, value, body)
+                        return Expression::Let(position: initial.index, var, value, body)
                     }
                 }
             }
@@ -2980,7 +3188,7 @@ struct Parser {
                 let accum_init = .parse(lexer)
                 guard lexer.next() is Do else { throw Error::from_string_literal("expected 'in'") }
                 let body = .parse(lexer)
-                return Expression::ForEach(var, index, accum, accum_init, list, body)
+                return Expression::ForEach(position: initial.index, var, index, accum, accum_init, list, body)
             }
             If => {
                 let condition = .parse(lexer)
@@ -2988,7 +3196,7 @@ struct Parser {
                 let consequence = .parse(lexer)
                 guard lexer.next() is Else else { throw Error::from_string_literal("expected 'else'") }
                 let alternative = .parse(lexer)
-                return Expression::IfThenElse(condition, consequence, alternative)
+                return Expression::IfThenElse(position: initial.index, condition, consequence, alternative)
             }
             Eof => {
                 throw Error::from_string_literal("unexpected EOF")
@@ -3010,29 +3218,29 @@ struct Parser {
             match lexer.peek() {
                 LSquare => {
                     // expr[index]
-                    lexer.next()
+                    let brac = lexer.next()
                     let index = .parse(lexer)
                     guard lexer.next() is RSquare else { throw Error::from_string_literal("expected ']'") }
-                    base = Expression::Subscript(expr: base, index)
+                    base = Expression::Subscript(position: brac.index, expr: base, index)
                 }
                 Dot => {
                     // expr.index
-                    lexer.next()
+                    let dot = lexer.next()
                     guard lexer.next() is IntLiteral(value: index) else { throw Error::from_string_literal("expected index") }
-                    base = Expression::Subscript(expr: base, index: Expression::IntLiteral(value: index))
+                    base = Expression::Subscript(position: dot.index, expr: base, index: Expression::IntLiteral(value: index))
                 }
                 Comma => {
                     if comma_can_be_pair {
-                        lexer.next()
+                        let comma = lexer.next()
                         let right = .parse(lexer)
-                        base = Expression::Operation(op: Operation::Pair, operands: [base, right])
+                        base = Expression::Operation(position: comma.index, op: Operation::Pair, operands: [base, right])
                     } else {
                         return base
                     }
                 }
                 LParen => {
                     // expr(op...)
-                    lexer.next()
+                    let lp = lexer.next()
                     mut arguments: [Expression] = []
                     loop {
                         match lexer.peek() {
@@ -3052,18 +3260,23 @@ struct Parser {
                             }
                         }
                     }
-                    base = Expression::Call(procedure: base, arguments)
+                    base = Expression::Call(position: lp.index, procedure: base, arguments)
                 }
                 Plus | Dash | Slash | Star | Gt => {
                     let op = lexer.next()
                     let right = .parse(lexer)
-                    base = Expression::Operation(op: match op {
+                    base = Expression::Operation(position: op.index, op: match op {
                         Plus => Operation::Add
                         Dash => Operation::Sub
                         Slash => Operation::Div
                         Star => Operation::Mul
                         Gt => Operation::Gt
                         else => {
+                            emit_machine_readable(
+                                kind: "error"
+                                message: "unexpected operator"
+                                positions: [op.index]
+                            )
                             abort()
                         }
                     }, operands: [base, right])
@@ -3080,17 +3293,17 @@ struct Parser {
         mut this
         lexer: &mut Lexer
     ) throws -> TypeId => match lexer.next() {
-        Name(value) => match value {
+        Name(index: index, value) => match value {
             "list" => {
                 let inner = .parse_type(lexer)
                 guard lexer.next() is IntLiteral(value: size) else { throw Error::from_string_literal("expected size") }
                 let type_id = TypeId(id: .type_map.size() as! u64)
-                .type_map.set(type_id, Type::List(type: inner, size: size as! usize))
+                .type_map.set(type_id, Type::List(positions: [index], type: inner, size: size as! usize))
                 return type_id
             }
             "int" => {
                 let type_id = TypeId(id: .type_map.size() as! u64)
-                .type_map.set(type_id, Type::Int(InferredRange::Unknown))
+                .type_map.set(type_id, Type::Int(positions: [index], InferredRange::Unknown))
                 return type_id
             }
             else => {
@@ -3116,14 +3329,14 @@ struct Parser {
         loop {
             match lexer.peek() {
                 Ecks | Comma => {
-                    lexer.next()
+                    let p = lexer.next()
                     let right = .parse_type(lexer)
                     let type_id = TypeId(id: .type_map.size() as! u64)
-                    .type_map.set(type_id, Type::Pair(left: base, right: right))
+                    .type_map.set(type_id, Type::Pair(positions: [p.index], left: base, right: right))
                     base = type_id
                 }
                 Arrow => {
-                    lexer.next()
+                    let p = lexer.next()
                     mut sensitivity_name: String? = None
                     mut sensitivity_multiplier: f64? = None
                     if lexer.peek() is LBrace {
@@ -3158,10 +3371,10 @@ struct Parser {
                     let type_id = TypeId(id: .type_map.size() as! u64)
                     let smbase = SensitivityMapped(value: base, sensitivity: sens)
                     froms.push(("", smbase))
-                    .type_map.set(type_id, Type::Arrow(from: froms, to: right))
+                    .type_map.set(type_id, Type::Arrow(positions: [p.index], from: froms, to: right))
                     base = type_id
                 }
-                Name(value) => match value {
+                Name(index, value) => match value {
                     "lab" => {
                         lexer.next()
                         guard lexer.next() is LBrace else { throw Error::from_string_literal("expected '{'") }
@@ -3175,7 +3388,7 @@ struct Parser {
                         guard lexer.next() is RBrace else { throw Error::from_string_literal("expected '}'") }
 
                         let type_id = TypeId(id: .type_map.size() as! u64)
-                        .type_map.set(type_id, Type::TypeWithSec(type: base, label: Label(name: label), epsilon: epsilon_id))
+                        .type_map.set(type_id, Type::TypeWithSec(positions: [index], type: base, label: Label(name: label), epsilon: epsilon_id))
                         base = type_id
                     }
                     else => {
