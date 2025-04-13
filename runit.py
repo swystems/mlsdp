@@ -7,6 +7,7 @@ import argparse
 REPEATS = 500
 CXX_COMPILER = "clang++"
 VELVET_COMPILER = "build/velvet"
+TEST_COMPILE_RUN_TIMES = False
 
 def compile(name, noisy=True, rerun=True):
     global CXX_COMPILER, VELVET_COMPILER
@@ -38,26 +39,25 @@ def run(name):
     subprocess.run(["./out"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     end = time()
     print("Compilation time:", end - start, "seconds")
-    expected = to_int8(subprocess.run(["./out"]).returncode)
+    expected = int(subprocess.check_output(["./out"]).strip())
     outputs = []
     run_times = []
     compile_run_times = []
+    start_cr = time()
     compile(name, rerun=True)
+    end_cr = time()
+    compile_run_times.append(end_cr - start_cr)
     for _ in tqdm(range(REPEATS)):
-        start_cr = time()
-        # compile(name, rerun=True)
-        end_cr = time()
-        compile_run_times.append(end_cr - start_cr)
-        result = subprocess.run(["./out"])
+        if TEST_COMPILE_RUN_TIMES:
+            start_cr = time()
+            compile(name, rerun=True)
+            end_cr = time()
+            compile_run_times.append(end_cr - start_cr)
+        result = int(subprocess.check_output(["./out"]).strip())
         end = time()
-        outputs.append(to_int8(result.returncode))
+        outputs.append(result)
         run_times.append(end - end_cr)
     return RunResult(outputs, expected, run_times, compile_run_times)
-
-def to_int8(x):
-    return x
-    ## Wrap x into the range -128 to 127 (two's complement conversion)
-    #return (x + 128) % 256 - 128
 
 def main():
     global REPEATS, CXX_COMPILER, VELVET_COMPILER
@@ -67,6 +67,7 @@ def main():
     parser.add_argument("--cxx-compiler", type=str, default=CXX_COMPILER)
     parser.add_argument("--velvet-compiler", type=str, default=VELVET_COMPILER)
     parser.add_argument("--test-case", action="append", default=[])
+    parser.add_argument("--test-compile-run-times", action="store_true", default=False)
     args = parser.parse_args()
 
     REPEATS = args.repeats

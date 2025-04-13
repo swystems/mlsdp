@@ -169,6 +169,15 @@ class LabelLattice {
             }
         }
 
+        for (label, lessers) in hierarchy {
+            if lessers.size() == 0 {
+                bottoms.push(label)
+            }
+            for lesser in lessers {
+                map[label].set(lesser, Fnv(func: fn[&map_direct, label, lesser](anon epsilon: Epsilon) => map_direct(from: label, to: lesser, epsilon)))
+            }
+        }
+
         return LabelLattice(tops: tops, bottoms: bottoms, hierarchy, epsilon_map, map)
     }
 
@@ -210,7 +219,7 @@ class LabelLattice {
         mut costs: [Label:f64] = [from: 0f64]
         mut parents: [Label:Label] = [:]
 
-        if .ancestors(from).contains(to) {
+        if .ancestors(to).contains(from) {
             return ([from, to], 0.0f64)
         }
 
@@ -242,6 +251,15 @@ class LabelLattice {
 
         // No direct path, try to find a path through a common ancestor
         let common_ancestor = .join(from, to)
+        if common_ancestor == from or common_ancestor == to {
+            eprintln("No path from {} to {} (common ancestor {})", from, to, common_ancestor)
+            emit_machine_readable(
+                kind: "no_path"
+                message: format("No path from {} to {} (common ancestor {})", from, to, common_ancestor)
+                positions: [0]
+            )
+            return None
+        }
         guard .best_path_for(from, to: common_ancestor, epsilon) is Some(fpc)
             and .best_path_for(from: common_ancestor, to, epsilon) is Some(cpt)
             else { return None }
@@ -445,7 +463,7 @@ boxed enum Type {
 }
 
 enum Operation {
-    Add, Sub, Mul, Div, Pair, Gt
+    Add, Sub, Mul, Div, Pair, Gt, Mod
 }
 
 boxed enum Expression {
@@ -464,6 +482,119 @@ boxed enum Expression {
     IfThenElse(condition: Expression, consequence: Expression, alternative: Expression)
     Let(var: String, value: Expression, body: Expression)
     Ignore
+
+    fn substitute_vars(this, anon var: String, with: Expression) throws -> Expression => match this {
+        IntLiteral => this
+        ListLiteral(elements) => {
+            mut out_elements: [Expression] = []
+            for element in elements {
+                out_elements.push(element.substitute_vars(var, with))
+            }
+            yield Expression::ListLiteral(
+                position: .position
+                type: .type
+                elements: out_elements
+            )
+        }
+        Variable(name) => {
+            if name == var { return with }
+            return this
+        }
+        Noise(expr, epsilon) => {
+            let new_expr = expr.substitute_vars(var, with)
+            return Expression::Noise(
+                position: .position
+                type: .type
+                expr: new_expr
+                epsilon: epsilon
+            )
+        }
+        Declassify(expr, source_epsilon, target_label, target_epsilon, used_epsilon) => {
+            let new_expr = expr.substitute_vars(var, with)
+            return Expression::Declassify(
+                position: .position
+                type: .type
+                expr: new_expr
+                source_epsilon: source_epsilon
+                target_label: target_label
+                target_epsilon: target_epsilon
+                used_epsilon: used_epsilon
+            )
+        }
+        Subscript(expr, index) => {
+            let new_expr = expr.substitute_vars(var, with)
+            let new_index = index.substitute_vars(var, with)
+            return Expression::Subscript(
+                position: .position
+                type: .type
+                expr: new_expr
+                index: new_index
+            )
+        }
+        Operation(op, operands) => {
+            mut out_operands: [Expression] = []
+            for operand in operands {
+                out_operands.push(operand.substitute_vars(var, with))
+            }
+            return Expression::Operation(
+                position: .position
+                type: .type
+                op: op
+                operands: out_operands
+            )
+        }
+        Call(procedure, arguments) => {
+            let new_procedure = procedure.substitute_vars(var, with)
+            mut out_arguments: [Expression] = []
+            for argument in arguments {
+                out_arguments.push(argument.substitute_vars(var, with))
+            }
+            return Expression::Call(
+                position: .position
+                type: .type
+                procedure: new_procedure
+                arguments: out_arguments
+            )
+        }
+        ForEach(var, index, accum, accum_init, list, body) => {
+            let new_list = list.substitute_vars(var, with)
+            let new_body = body.substitute_vars(var, with)
+            return Expression::ForEach(
+                position: .position
+                type: .type
+                var: var
+                index: index
+                accum: accum
+                accum_init: accum_init
+                list: new_list
+                body: new_body
+            )
+        }
+        IfThenElse(condition, consequence, alternative) => {
+            let new_condition = condition.substitute_vars(var, with)
+            let new_consequence = consequence.substitute_vars(var, with)
+            let new_alternative = alternative.substitute_vars(var, with)
+            return Expression::IfThenElse(
+                position: .position
+                type: .type
+                condition: new_condition
+                consequence: new_consequence
+                alternative: new_alternative
+            )
+        }
+        Let(var, value, body) => {
+            let new_value = value.substitute_vars(var, with)
+            let new_body = body.substitute_vars(var, with)
+            return Expression::Let(
+                position: .position
+                type: .type
+                var: var
+                value: new_value
+                body: new_body
+            )
+        }
+        Ignore => this
+    }
 
     fn with_type(this, anon type: TypeId, sensitivity: SensitivityId? = None, sensitivity_multiplier: f64 = 1.0) -> Expression {
         mut sens = SensitivityMapped(value: .type.value, sensitivity: .type.sensitivity)
@@ -703,6 +834,7 @@ boxed enum Expression {
                     Sub => "-"
                     Mul => "*"
                     Div => "/"
+                    Mod => "%"
                     Pair => ","
                     Gt => ">"
                 }
@@ -1055,6 +1187,7 @@ fn merge_bounds(
                             true => InferredRange::Unknown
                             false => InferredRange::Bounded(from: min(min(from1 / from2, from1 / to2), min(to1 / from2, to1 / to2)) to: max(max(from1 / from2, from1 / to2), max(to1 / from2, to1 / to2)))
                         }
+                        Mod => InferredRange::Bounded(from: min(min(from1 % from2, from1 % to2), min(to1 % from2, to1 % to2)), to: max(max(from1 % from2, from1 % to2), max(to1 % from2, to1 % to2)))
                         Pair => {
                             eprintln("Invalid operation for int: Pair")
                             emit_machine_readable(
@@ -1093,6 +1226,15 @@ fn merge_bounds(
                             emit_machine_readable(
                                 kind: "invalid_operation"
                                 message: format("Invalid operation for bool: Gt")
+                                positions: do_union(type1.positions, type2.positions)
+                            )
+                            abort()
+                        }
+                        Mod => {
+                            eprintln("Invalid operation for bool: Mod")
+                            emit_machine_readable(
+                                kind: "invalid_operation"
+                                message: format("Invalid operation for bool: Mod")
                                 positions: do_union(type1.positions, type2.positions)
                             )
                             abort()
@@ -1237,7 +1379,7 @@ fn sens_merge(
         else { return None }
     let result = match op {
         Add | Sub => value1 + value2 + local_sensitivity
-        Mul | Div => value1 * rhs_max_diff + value2 * lhs_max_diff + local_sensitivity
+        Mod | Mul | Div => value1 * rhs_max_diff + value2 * lhs_max_diff + local_sensitivity
         Gt => 1f64
         Pair => 1f64
     }
@@ -1656,7 +1798,7 @@ fn typecheck(
             )
             let body_sens = body_stmt.type.sensitivity
             mut loop_sensitivity = body_stmt.type.sensitivity
-            mut loop_sensitivity_multiplier = list_type.element_count(&type_map) as! f64
+            // mut loop_sensitivity_multiplier = list_type.element_count(&type_map) as! f64
 
             if sens_merge(
                 list_sens
@@ -1671,13 +1813,13 @@ fn typecheck(
                 type_level_sensitivity_context.insert(body_stmt.type.value, new_sens)
                 let total_sensitivity_multiplier = list_type.element_count(&type_map)
                 loop_sensitivity = new_sens
-                loop_sensitivity_multiplier = total_sensitivity_multiplier as! f64
+                // loop_sensitivity_multiplier = total_sensitivity_multiplier as! f64
             }
 
             yield Expression::ForEach(position: expr.position, var, index, accum, accum_init: accum_init_expr, list: list_expr, body: body_stmt).with_type(
                 type: accum_var_type
                 sensitivity: loop_sensitivity
-                sensitivity_multiplier: loop_sensitivity_multiplier
+                sensitivity_multiplier: 1f64 //loop_sensitivity_multiplier
             )
         }
         IfThenElse(condition, consequence, alternative) => {
@@ -1966,7 +2108,7 @@ fn main(args: [String]) {
     mut type_level_sensitivity_context: Context<TypeId, SensitivityId> = Context(map: [:])
     mut epsilon_context: Context<EpsilonId, Epsilon> = Context(map: [:])
     mut sensitivity_context: Context<SensitivityId, f64> = Context(map: [:])
-    let scale = 499
+    let scale = 500
     let map_direct = fn[scale](anon from: Label, anon to: Label, anon available_epsilon: Epsilon) -> f64 => scale as! f64 // todo!
     mut lattice = LabelLattice::make(
         hierarchy: [
@@ -2131,7 +2273,13 @@ fn codegen(
         first = false
     }
     print(") {{\n")
-    print("return (")
+    if proc.name == "main" {
+        // print the output out
+        print("    cout << ")
+    } else {
+        print("    return ")
+    }
+    print("(")
     codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, proc.body)
     print(");\n")
     print("}}\n")
@@ -2269,8 +2417,7 @@ fn codegen(
     }
     println("}};")
 
-    for (id, epsilon) in epsilon_context {
-        print("Epsilon E{} = ", id.id)
+    let print_eps = fn(anon epsilon: Epsilon) {
         match epsilon {
             Fixed(value) => print("{:.5f}", value)
             Multiply(a, b) => print("emul(E{}, E{})", a.id, b.id)
@@ -2281,8 +2428,26 @@ fn codegen(
             Min(a, b) => print("emin(E{}, E{})", a.id, b.id)
             RuntimeVar(name) => print("evar(\"{}\")", name)
         }
+    }
+
+    for (id, epsilon) in epsilon_context {
+        print("Epsilon E{} = ", id.id)
+        print_eps(epsilon)
         println(";")
     }
+
+    // label_epsilon(L)
+    println("Epsilon label_epsilon(Label label) {{")
+    println("    switch (label) {{")
+    for label in lattice.all_labels() {
+        print("        case {}: return ", label.name)
+        print_eps(lattice.epsilon_map[label])
+        println(";")
+    }
+    println("        default: return E0;")
+    println("    }}")
+    println("}}")
+    println()
 
     // noise(x, e) = laplace(x, e)
     println("template<typename T>")
@@ -2292,6 +2457,7 @@ fn codegen(
     println("#else")
     println("    if (epsilon.index() != 0) epsilon = evar(get<string>(epsilon));")
     println("    if (epsilon.index() == 0) {{")
+    println("        if (get<double>(epsilon) == 0.0) return x;")
     println("        double e = 1.0 / get<double>(epsilon);")
     println("        random_device rd;")
     println("        mt19937 gen(rd());")
@@ -2315,7 +2481,7 @@ fn codegen(
     println("T declassify(T x, Label source_label, Epsilon source, Label target_label, Epsilon target) {{")
     println("     for (auto path : paths) {{")
     println("         if (path->from == source_label && path->to == target_label) {{")
-    println("             return noise(x, path->epsilon);")
+    println("             return noise(x, emul(source, ediv(path->epsilon, label_epsilon(source_label))));")
     println("         }}")
     println("     }}")
     println("     abort();")
@@ -2410,6 +2576,7 @@ fn codegen(
                     Sub => "-"
                     Mul => "*"
                     Div => "/"
+                    Mod => "%"
                     Gt => ">"
                     Pair => { abort() }
                 }
@@ -2903,7 +3070,7 @@ enum Token {
     Else
     Eof
     Equal
-    Foreach
+    For
     If
     In
     IntLiteral(value: i64)
@@ -2919,6 +3086,7 @@ enum Token {
     RParen
     RSquare
     Slash
+    Percent
     Star
     Then
     Gt
@@ -2967,6 +3135,7 @@ struct Lexer {
                 b':' => .consume(1, Token::Colon(index: .offset))
                 b'*' => .consume(1, Token::Star(index: .offset))
                 b'/' => .consume(1, Token::Slash(index: .offset))
+                b'%' => .consume(1, Token::Percent(index: .offset))
                 b'-' => {
                     if .offset + 1 < .input.size() {
                         if .input[.offset + 1] == b'>' {
@@ -3038,7 +3207,7 @@ struct Lexer {
 
         let name = value.to_string()
         return match name {
-            "for" => Token::Foreach(index)
+            "for" => Token::For(index)
             "if" => Token::If(index)
             "else" => Token::Else(index)
             "then" => Token::Then(index)
@@ -3109,7 +3278,26 @@ struct Parser {
                 return inner
             }
             LSquare => {
-                // [expr,*]
+                // [expr,*] or [for x in n..n: expr]
+                if lexer.peek() is For {
+                    lexer.next()
+                    guard lexer.next() is Name(value: var) else { throw Error::from_string_literal("expected name") }
+                    guard lexer.next() is In else { throw Error::from_string_literal("expected 'in'") }
+                    let index_position = lexer.peek().index
+                    guard lexer.next() is IntLiteral(value: start) else { throw Error::from_string_literal("expected min bound") }
+                    guard lexer.next() is Dot else { throw Error::from_string_literal("expected '..'") }
+                    guard lexer.next() is Dot else { throw Error::from_string_literal("expected '..'") }
+                    guard lexer.next() is IntLiteral(value: end) else { throw Error::from_string_literal("expected max bound") }
+                    guard lexer.next() is Colon else { throw Error::from_string_literal("expected ':'") }
+                    let body = .parse(lexer)
+                    guard lexer.next() is RSquare else { throw Error::from_string_literal("expected ']'") }
+                    // synthesize the expression [expr_i, ...]
+                    mut elements: [Expression] = []
+                    for i in start..end {
+                        elements.push(body.substitute_vars(var, with: Expression::IntLiteral(position: index_position, value: i)))
+                    }
+                    return Expression::ListLiteral(position: initial.index, elements)
+                }
                 mut elements: [Expression] = []
                 loop {
                     match lexer.peek() {
@@ -3171,7 +3359,7 @@ struct Parser {
                     }
                 }
             }
-            Foreach => {
+            For => {
                 // for x in xs index i accum s = expr do
                 guard lexer.next() is Name(value: var) else { throw Error::from_string_literal("expected name") }
                 guard lexer.next() is In else { throw Error::from_string_literal("expected 'in'") }
@@ -3262,13 +3450,14 @@ struct Parser {
                     }
                     base = Expression::Call(position: lp.index, procedure: base, arguments)
                 }
-                Plus | Dash | Slash | Star | Gt => {
+                Plus | Dash | Slash | Percent | Star | Gt => {
                     let op = lexer.next()
                     let right = .parse(lexer)
                     base = Expression::Operation(position: op.index, op: match op {
                         Plus => Operation::Add
                         Dash => Operation::Sub
                         Slash => Operation::Div
+                        Percent => Operation::Mod
                         Star => Operation::Mul
                         Gt => Operation::Gt
                         else => {
