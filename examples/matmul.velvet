@@ -16,3 +16,4 @@ in add_all(flatten_to_pub(matmul(
     [for i in 0..16: [for j in 0..16: i * 16 + j]],
     [for i in 0..16: [for j in 0..16: (j * 16 + i)]]
 )))
+

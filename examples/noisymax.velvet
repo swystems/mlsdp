@@ -4,3 +4,4 @@ let noisymax = proc(
     let score = declassify(x, e1/100, Public, 0) in
         if score > s.0 then (score, declassify(x, 0, Public, 0)) else s).1
 in noisymax([for i in 0..100: i])
+

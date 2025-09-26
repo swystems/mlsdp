@@ -463,7 +463,7 @@ boxed enum Type {
 }
 
 enum Operation {
-    Add, Sub, Mul, Div, Pair, Gt, Mod
+    Add, Sub, Mul, Div, Pair, Gt, Eq, Mod, LogicalAnd, LogicalOr
 }
 
 boxed enum Expression {
@@ -837,6 +837,9 @@ boxed enum Expression {
                     Mod => "%"
                     Pair => ","
                     Gt => ">"
+                    Eq => "=="
+                    LogicalAnd => "&"
+                    LogicalOr => "|"
                 }
                 mut builder = StringBuilder::create()
                 builder.append("(")
@@ -1179,6 +1182,7 @@ fn merge_bounds(
                         Add => InferredRange::Bounded(from: from1 + from2, to: to1 + to2)
                         Sub => InferredRange::Bounded(from: from1 - to2, to: to1 - from2)
                         Gt => InferredRange::Bounded(from: match from1 > from2 { true => 1, false => 0 }, to: match to1 > to2 { true => 1, false => 0 })
+                        Eq => InferredRange::Bounded(from: 0, to: 1)
                         Mul => InferredRange::Bounded(
                             from: min(min(from1 * from2, from1 * to2), min(to1 * from2, to1 * to2))
                             to: max(max(from1 * from2, from1 * to2), max(to1 * from2, to1 * to2))
@@ -1188,11 +1192,11 @@ fn merge_bounds(
                             false => InferredRange::Bounded(from: min(min(from1 / from2, from1 / to2), min(to1 / from2, to1 / to2)) to: max(max(from1 / from2, from1 / to2), max(to1 / from2, to1 / to2)))
                         }
                         Mod => InferredRange::Bounded(from: min(min(from1 % from2, from1 % to2), min(to1 % from2, to1 % to2)), to: max(max(from1 % from2, from1 % to2), max(to1 % from2, to1 % to2)))
-                        Pair => {
-                            eprintln("Invalid operation for int: Pair")
+                        else => {
+                            eprintln("Invalid operation for int")
                             emit_machine_readable(
                                 kind: "invalid_operation"
-                                message: format("Invalid operation for int: Pair")
+                                message: format("Invalid operation for int")
                                 positions: do_union(type1.positions, type2.positions)
                             )
                             abort()
@@ -1217,8 +1221,8 @@ fn merge_bounds(
                     Unknown => range2
                     Bounded(from: from2, to: to2) => match op {
                         // Add: OR, Mul: AND, Sub: AND NOT, Div: AND NOT; TODO: Split into actual bool operations.
-                        Add => InferredRange::Bounded(from: from1 or from2, to: to1 or to2)
-                        Mul => InferredRange::Bounded(from: from1 and from2, to: to1 and to2)
+                        LogicalOr | Add => InferredRange::Bounded(from: from1 or from2, to: to1 or to2)
+                        LogicalAnd | Mul => InferredRange::Bounded(from: from1 and from2, to: to1 and to2)
                         Sub => InferredRange::Bounded(from: from1 and not to2, to: to1 and not from2)
                         Div => InferredRange::Bounded(from: from1 and not to2, to: to1 and not from2)
                         Gt => {
@@ -1230,6 +1234,7 @@ fn merge_bounds(
                             )
                             abort()
                         }
+                        Eq => InferredRange::Bounded(from: false, to: true)
                         Mod => {
                             eprintln("Invalid operation for bool: Mod")
                             emit_machine_readable(
@@ -1380,8 +1385,7 @@ fn sens_merge(
     let result = match op {
         Add | Sub => value1 + value2 + local_sensitivity
         Mod | Mul | Div => value1 * rhs_max_diff + value2 * lhs_max_diff + local_sensitivity
-        Gt => 1f64
-        Pair => 1f64
+        else => 1f64
     }
 
     let id = SensitivityId(id: sensitivity_context.map.size() as! u64)
@@ -2153,9 +2157,9 @@ fn main(args: [String]) {
         Procedure(name: "main", parameters: main_params, return_type: main_return_type, body: main_contents)
     )
 
-    for proc in procs {
-        eprintln("{}: {}", proc.name, proc.to_tree(&type_map))
-    }
+    // for proc in procs {
+    //     eprintln("{}: {}", proc.name, proc.to_tree(&type_map))
+    // }
 
 
     // let procs = make_test_program(
@@ -2202,10 +2206,10 @@ fn main(args: [String]) {
         checked_procs.push(checked)
     }
 
-    for proc in checked_procs {
-        eprintln("{}", proc.to_lang(&type_map, indent: 0))
-    }
-    eprintln("main()")
+    // for proc in checked_procs {
+    //     eprintln("{}", proc.to_lang(&type_map, indent: 0))
+    // }
+    // eprintln("main()")
 
     match type_map[existing_procs["main"]].pure_type(&type_map) {
         Arrow(to) => {
@@ -2237,9 +2241,9 @@ fn main(args: [String]) {
     eprintln("Epsilon context:")
     epsilon_context.dump()
 
-    for proc in checked_procs {
-        eprintln("{}", proc.to_tree(&type_map, indent: 0))
-    }
+    // for proc in checked_procs {
+    //     eprintln("{}", proc.to_tree(&type_map, indent: 0))
+    // }
 
     codegen(
         &lattice
@@ -2504,17 +2508,20 @@ fn codegen(
     match expr {
         IntLiteral(value) => print("{}", value)
         ListLiteral(type, elements) => {
+            print("({{")
             codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, type.value)
-            print("{{")
-            mut first = true
+            print(" _temp_var; ")
+            mut i = 0
             for element in elements {
-                if not first {
-                    print(", ")
+                if i > 0 {
+                    print(" ")
                 }
+                print("_temp_var[{}] = ", i)
                 codegen(lattice, type_map, type_context, type_level_sensitivity_context, epsilon_context, sensitivity_context, element)
-                first = false
+                print(";")
+                i += 1
             }
-            print("}}")
+            print(" _temp_var; }})")
         }
         Variable(name) => print("{}", name)
         Subscript(expr, index) => {
@@ -2578,6 +2585,9 @@ fn codegen(
                     Div => "/"
                     Mod => "%"
                     Gt => ">"
+                    Eq => "=="
+                    LogicalAnd => "&&"
+                    LogicalOr => "||"
                     Pair => { abort() }
                 }
                 mut first = true
@@ -3090,6 +3100,8 @@ enum Token {
     Star
     Then
     Gt
+    Ampersand
+    Pipe
 }
 
 fn todo() -> never {
@@ -3122,7 +3134,7 @@ struct Lexer {
                 b'0'..b'9' | b'9' => {
                     return .lex_number()
                 }
-                b'a'..b'z' | b'A'..b'Z' | b'_' | b'z' | b'Z' => {
+                b'a'..b'z' | b'A'..b'Z' | b'_' | b'z' | b'Z' | b'#' => {
                     return .lex_name()
                 }
                 b'(' => .consume(1, Token::LParen(index: .offset))
@@ -3151,6 +3163,8 @@ struct Lexer {
                 b'.' => .consume(1, Token::Dot(index: .offset))
                 b'=' => .consume(1, Token::Equal(index: .offset))
                 b'>' => .consume(1, Token::Gt(index: .offset))
+                b'&' => .consume(1, Token::Ampersand(index: .offset))
+                b'|' => .consume(1, Token::Pipe(index: .offset))
                 else => {
                     eprintln("unexpected character in token stream: {:c} at offset {}", c, .offset)
                     emit_machine_readable(
@@ -3199,7 +3213,8 @@ struct Lexer {
             .input[.offset] <= b'Z' or
             .input[.offset] >= b'0' and
             .input[.offset] <= b'9' or
-            .input[.offset] == b'_' {
+            .input[.offset] == b'_' or
+            .input[.offset] == b'#' {
 
             value.append(.input[.offset])
             .offset += 1
@@ -3214,7 +3229,7 @@ struct Lexer {
             "in" => Token::In(index)
             "proc" => Token::Proc(index)
             "let" => Token::Let(index)
-            "×" => Token::Ecks(index)
+            "#" => Token::Ecks(index)
             "declassify" => Token::Declassify(index)
             "noise" => Token::Noise(index)
             "do" => Token::Do(index)
@@ -3450,8 +3465,21 @@ struct Parser {
                     }
                     base = Expression::Call(position: lp.index, procedure: base, arguments)
                 }
-                Plus | Dash | Slash | Percent | Star | Gt => {
+                Plus | Dash | Slash | Percent | Star | Gt | Equal | Ampersand | Pipe => {
                     let op = lexer.next()
+                    if op is Equal {
+                        let next = lexer.peek()
+                        guard next is Equal else {
+                            emit_machine_readable(
+                                kind: "error"
+                                message: "unexpected operator"
+                                positions: [op.index, next.index]
+                            )
+                            abort()
+                        }
+                        lexer.next()
+                    }
+
                     let right = .parse(lexer)
                     base = Expression::Operation(position: op.index, op: match op {
                         Plus => Operation::Add
@@ -3460,6 +3488,9 @@ struct Parser {
                         Percent => Operation::Mod
                         Star => Operation::Mul
                         Gt => Operation::Gt
+                        Ampersand => Operation::LogicalAnd
+                        Pipe => Operation::LogicalOr
+                        Equal => Operation::Eq
                         else => {
                             emit_machine_readable(
                                 kind: "error"
