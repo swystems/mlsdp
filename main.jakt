@@ -188,8 +188,19 @@ class LabelLattice {
         let b_ancestors = .ancestors(b)
         if b_ancestors.contains(a) { return a }
 
+        let hierarchy = &.hierarchy
+
         return fold(a_ancestors.intersection(b_ancestors),
-            &fn[this](anon acc: Label, anon x: &Label) throws -> Label => match .hierarchy[acc].contains(*x) { true => *x, false => acc }
+            &fn[this](anon acc: Label, anon x: &Label) throws -> Label => match .hierarchy[acc].contains(*x) { true => *x, false => acc },
+            _default: &fn[a, b, &hierarchy]() -> Label {
+                eprintln("No common ancestor for {} and {}", a, b)
+                emit_machine_readable(
+                    kind: "no_common_ancestor"
+                    message: format("No common ancestor for {} and {}", a, b)
+                    positions: [0]
+                )
+                abort()
+            }
         )
     }
 
@@ -199,6 +210,7 @@ class LabelLattice {
         while open.size() > 0 {
             let current = open.pop()!
             closed.push(current)
+            if not .hierarchy.contains(current) { continue }
             for parent in .hierarchy[current] {
                 if not closed.contains(parent) and not open.contains(parent) {
                     open.push(parent)
@@ -226,6 +238,15 @@ class LabelLattice {
         while open.size() > 0 {
             let current = fold(open,
                 &fn[this, &costs](anon acc: Label, anon x: &Label) throws -> Label => match costs[x] < costs[acc] { true => *x, false => acc }
+                _default: &fn[from, to]() -> Label {
+                    eprintln("No path from {} to {}", from, to)
+                    emit_machine_readable(
+                        kind: "no_path"
+                        message: format("No path from {} to {}", from, to)
+                        positions: [0]
+                    )
+                    abort()
+                }
             )
             if current == to {
                 mut result: [Label] = [to]
@@ -352,7 +373,11 @@ type Array implements(Map<T>) {
 fn fold<T>(
     anon list: [T]
     anon f: &fn(anon acc: T, anon x: &T) throws -> T
+    _default: &fn() -> T
 ) throws -> T {
+    if list.is_empty() {
+        return _default()
+    }
     mut acc = list[0]
     for x in list[1..] {
         acc = f(acc, &x)
@@ -1658,6 +1683,7 @@ fn typecheck(
                         )
                         return (sens, acc.1)
                     }
+                    _default: &fn() -> (SensitivityMapped<TypeId>, Context<SensitivityId, f64>) { abort() }
                 ).0
             }
 
@@ -2505,6 +2531,8 @@ fn codegen(
     sensitivity_context: &mut Context<SensitivityId, f64>
     anon expr: Expression
 ) throws {
+    print("(")
+    defer print(")")
     match expr {
         IntLiteral(value) => print("{}", value)
         ListLiteral(type, elements) => {
