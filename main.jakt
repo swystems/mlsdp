@@ -1351,7 +1351,7 @@ fn merge_bounds(
                 }
                 let inner = merge_bounds(type_map, epsilon_context, type_map[ty1], type_map[ty2], op)
                 let epsilon = EpsilonId(id: epsilon_context.map.size() as! u64)
-                epsilon_context.insert(epsilon, Epsilon::Max(a: epsilon1, b: epsilon2))
+                epsilon_context.insert(epsilon, Epsilon::Min(a: epsilon1, b: epsilon2))
                 yield Type::TypeWithSec(positions: do_union(type1.positions, type2.positions), type: make_type(type_map, inner), label: label1, epsilon)
             }
             else => {
