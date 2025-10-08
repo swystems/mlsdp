@@ -1,0 +1,49 @@
+{
+  "policyName": "DeclassificationPolicy",
+  "service": "hive",
+  "policyType": 0,
+  "resources": {
+    "database": {
+      "values": ["default"],
+      "isExcludes": false,
+      "isRecursive": false
+    },
+    "table": {
+      "values": ["weighted_data", "data"],
+      "isExcludes": false,
+      "isRecursive": false
+    }
+  },
+  "policyItems": [
+    {
+      "users": ["hive_user"],
+      "accesses": [
+        {
+          "type": "select",
+          "isAllowed": true
+        },
+        {
+          "type": "declassify",
+          "isAllowed": true,
+          "conditions": [
+            {
+              "name": "sourceLevel",
+              "value": "L3"
+            },
+            {
+              "name": "targetLevel",
+              "value": "L2"
+            },
+            {
+              "name": "epsilon",
+              "value": "e1"
+            }
+          ]
+        }
+      ],
+      "delegateAdmin": false
+    }
+  ],
+  "isAuditEnabled": true
+}
+
